@@ -17,11 +17,14 @@ python3 -m chain_state --root ./state get alice
 python3 -m chain_state --root ./state root
 python3 -m chain_state --root ./state prove alice
 python3 -m chain_state --root ./state verify alice 100 <proof>
+python3 -m chain_state --root ./state delete alice
+python3 -m chain_state --root ./state prove-absence alice
+python3 -m chain_state --root ./state verify-absence alice <proof>
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`report`。
 
 ## 公开接口
 
@@ -29,23 +32,36 @@ python3 -m chain_state --root ./state verify alice 100 <proof>
 
 - `init() -> None` 建立空状态。
 - `set(account, balance) -> int` 写入余额并返回新版本号。
-- `get(account) -> int` 读取余额；账户不存在返回 0。
+- `get(account) -> int` 读取余额；账户不存在或已删除返回 0。
+- `delete(account) -> int` 删除存在的账户并返回新版本号；账户不存在抛出 `KeyError`。写入 0 不是删除。
 - `version() -> int` 当前版本号。
 - `state_root() -> str` 当前全部账户的状态根（十六进制）。
 - `prove(account) -> dict` 该账户的包含证明。
 - `verify(account, balance, proof) -> bool` 仅用证明与状态根验证。
+- `prove_absence(account) -> dict` 账户不存在证明；账户当前存在（含余额为 0）时抛出 `KeyError`。
+- `verify_absence(account, proof) -> bool` 仅凭证明验证账户不存在，不读取状态目录；任何不一致均返回 `False`。
+
+### 不存在证明
+
+证明为可序列化 JSON，包含 `account`、`root`、`size`，以及按名称排序后夹住目标账户的边界：
+
+- 空状态：`size` 为 0，无边框，`root` 必须等于空树的状态根。
+- 目标位于所有账户之前/之后：仅给出后继（索引 0）或前驱（索引 size-1）。
+- 目标位于两个账户之间：同时给出前驱与后继，且二者索引相邻。
+
+每条边界自带该账户的包含路径，验证方据此在不知晓全量状态的情况下确认边界真实、名称严格夹逼目标。
 
 ## 约定
 
 - 状态根必须只由账户与余额决定，与写入顺序无关。
 - 证明必须能被**不知道全量状态**的一方验证通过。
 - 余额为非负整数；非法输入抛出 `ValueError`。
+- 验证命令成功输出 `valid` 并以 0 退出，失败输出 `invalid` 并以 1 退出；证明 JSON 语法错误属于用法错误（退出码 2）。
 
 ## 限制
 
 - 单进程、单文件状态，无并发写保护。
 - 未实现分叉与重组；版本号只增不减。
-- 未实现删除账户（余额置 0 不等于删除）。
 
 ## 语料
 
