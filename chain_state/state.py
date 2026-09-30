@@ -79,6 +79,61 @@ class State:
         self._write(document)
         return document["version"]
 
+    def apply(self, transaction: dict) -> int:
+        """Apply one transaction of batched ``set`` writes and ``delete`` removals.
+
+        ``transaction`` is a JSON object with exactly two optional fields: ``set`` maps
+        non-empty account names to non-negative integer balances (booleans are not
+        integers), ``delete`` is an array of unique non-empty account names, none of
+        which may also appear in ``set``. Every check runs before anything is written,
+        so a rejected transaction leaves no visible change: malformed structure raises
+        ``ValueError``; deleting an unknown account raises ``KeyError``. A non-empty
+        batch commits atomically and adds exactly one version; an empty batch (both
+        fields omitted or empty) returns the current version without writing.
+        """
+        if not isinstance(transaction, dict):
+            raise ValueError("transaction must be a JSON object")
+        extra = set(transaction) - {"set", "delete"}
+        if extra:
+            raise ValueError(f"unexpected transaction fields: {', '.join(sorted(extra))}")
+        writes = transaction.get("set", {})
+        removals = transaction.get("delete", [])
+        if not isinstance(writes, dict):
+            raise ValueError("transaction 'set' must be a JSON object")
+        if not isinstance(removals, list):
+            raise ValueError("transaction 'delete' must be a JSON array")
+
+        for account, balance in writes.items():
+            if not isinstance(account, str) or not account:
+                raise ValueError("account must be a non-empty string")
+            if not isinstance(balance, int) or isinstance(balance, bool) or balance < 0:
+                raise ValueError("balance must be a non-negative integer")
+
+        seen: set[str] = set()
+        for account in removals:
+            if not isinstance(account, str) or not account:
+                raise ValueError("account must be a non-empty string")
+            if account in seen:
+                raise ValueError(f"duplicate delete for account {account!r}")
+            if account in writes:
+                raise ValueError(f"account {account!r} appears in both set and delete")
+            seen.add(account)
+
+        document = self._read()
+        accounts = document["accounts"]
+        if not writes and not removals:
+            return int(document["version"])
+        for account in removals:
+            if account not in accounts:
+                raise KeyError(f"unknown account {account!r}")
+        for account, balance in writes.items():
+            accounts[account] = balance
+        for account in removals:
+            del accounts[account]
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
     def version(self) -> int:
         """Current version number; 0 for an untouched state."""
         return int(self._read()["version"])
