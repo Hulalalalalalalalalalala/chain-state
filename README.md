@@ -21,6 +21,8 @@ python3 -m chain_state --root ./state verify alice 100 <proof>
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`report`。
+
 ## 公开接口
 
 `chain_state.State(root)`：
