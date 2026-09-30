@@ -32,6 +32,13 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
     verify.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    delete = sub.add_parser("delete", help="delete an existing account")
+    delete.add_argument("account")
+    prove_absence = sub.add_parser("prove-absence", help="print an absence proof as JSON")
+    prove_absence.add_argument("account")
+    verify_absence = sub.add_parser("verify-absence", help="verify an absence proof against the state root")
+    verify_absence.add_argument("account")
+    verify_absence.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -54,6 +61,15 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "delete":
+            print(state.delete(args.account))
+        elif args.command == "prove-absence":
+            print(json.dumps(state.prove_absence(args.account), sort_keys=True))
+        elif args.command == "verify-absence":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            ok = state.verify_absence(args.account, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":

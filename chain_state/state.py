@@ -7,6 +7,7 @@ the contents and not on the order in which accounts were written.
 
 from __future__ import annotations
 
+import bisect
 import json
 from pathlib import Path
 
@@ -58,8 +59,18 @@ class State:
         self._write(document)
         return document["version"]
 
+    def delete(self, account: str) -> int:
+        """Remove an existing ``account`` and return the new version number."""
+        document = self._read()
+        if account not in document["accounts"]:
+            raise KeyError(f"unknown account {account!r}")
+        del document["accounts"][account]
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
     def get(self, account: str) -> int:
-        """Balance of ``account``, or 0 when the account is unknown."""
+        """Balance of ``account``, or 0 when the account is unknown or deleted."""
         return int(self._read()["accounts"].get(account, 0))
 
     def version(self) -> int:
@@ -92,4 +103,73 @@ class State:
                 return False
             return verify_proof(_leaf(account, int(balance)), int(proof["index"]), proof["path"], str(proof["root"]))
         except (KeyError, TypeError, ValueError):
+            return False
+
+    def prove_absence(self, account: str) -> dict:
+        """Absence proof for an account that does not currently exist.
+
+        Absence follows from the accounts being sorted by name: the proof binds the hash gap
+        in which ``account`` would have to sit. ``before`` is the predecessor account (with its
+        inclusion proof), ``after`` the successor; each side is ``None`` at a list boundary.
+        With zero accounts both sides are ``None`` and the empty-tree root alone is the proof.
+        """
+        if not isinstance(account, str) or not account:
+            raise ValueError("account must be a non-empty string")
+        document = self._read()
+        accounts = document["accounts"]
+        if account in accounts:
+            raise KeyError(f"account exists {account!r}")
+        names = sorted(accounts)
+        leaves = [_leaf(n, int(accounts[n])) for n in names]
+        root = merkle_root(leaves).hex()
+        position = bisect.bisect_left(names, account)
+
+        def bound(index: int | None) -> dict | None:
+            if index is None:
+                return None
+            name = names[index]
+            return {"account": name, "balance": int(accounts[name]), "index": index,
+                    "path": merkle_proof(leaves, index)}
+
+        before = bound(position - 1 if position > 0 else None)
+        after = bound(position if position < len(names) else None)
+        return {"account": account, "root": root, "size": len(names), "before": before, "after": after}
+
+    def verify_absence(self, account: str, proof: dict) -> bool:
+        """Verify an absence proof using only the proof, never the state directory."""
+        try:
+            if not isinstance(proof, dict) or str(proof["account"]) != account:
+                return False
+            root, size = str(proof["root"]), int(proof["size"])
+            if size < 0:
+                return False
+            before, after = proof["before"], proof["after"]
+            if size == 0:
+                return before is None and after is None and root == merkle_root([]).hex()
+
+            def check_bound(bound, relation: str) -> tuple[str, int] | None:
+                if bound is None:
+                    return None
+                name = str(bound["account"])
+                balance, index = int(bound["balance"]), int(bound["index"])
+                if not 0 <= index < size:
+                    raise ValueError("boundary index out of range")
+                if not (name < account if relation == "before" else account < name):
+                    raise ValueError("boundary does not bracket the account")
+                if not verify_proof(_leaf(name, balance), index, bound["path"], root):
+                    raise ValueError("boundary proof does not match the root")
+                return name, index
+
+            left = check_bound(before, "before")
+            right = check_bound(after, "after")
+            # The two bounds must be adjacent leaves (or the single end leaf at a boundary),
+            # otherwise an existing account could occupy a position inside the gap.
+            if left is not None and right is not None:
+                return left[0] < right[0] and right[1] == left[1] + 1
+            if left is not None:
+                return right is None and left[1] == size - 1
+            if right is not None:
+                return left is None and right[1] == 0
+            return False
+        except (KeyError, TypeError, ValueError, AttributeError):
             return False

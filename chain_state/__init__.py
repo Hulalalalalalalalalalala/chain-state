@@ -1,6 +1,6 @@
 """chain-state: an account state machine with a verifiable state root."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 #: The technical domain this package belongs to.
 DOMAIN = "blockchain-state"
