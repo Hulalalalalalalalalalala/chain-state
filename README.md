@@ -18,13 +18,15 @@ python3 -m chain_state --root ./state root
 python3 -m chain_state --root ./state prove alice
 python3 -m chain_state --root ./state verify alice 100 <proof>
 python3 -m chain_state --root ./state delete alice
+python3 -m chain_state --root ./state apply '{"set": {"bob": 5}, "delete": ["alice"]}'
+echo '{"set": {"bob": 5}}' | python3 -m chain_state --root ./state apply -
 python3 -m chain_state --root ./state prove-absence alice
 python3 -m chain_state --root ./state verify-absence alice <proof>
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`report`。`apply` 的位置参数为内联交易 JSON（仅允许 `set` 对象与 `delete` 数组，二者皆可省略），值为 `-` 时从 stdin 读取；成功只输出版本号，JSON 语法或校验错误以 2 退出，未 init 以 1 退出。
 
 ## 公开接口
 
@@ -34,6 +36,7 @@ python3 -m chain_state --root ./state verify-absence alice <proof>
 - `set(account, balance) -> int` 写入余额并返回新版本号。
 - `get(account) -> int` 读取余额；账户不存在或已删除返回 0。
 - `delete(account) -> int` 删除存在的账户并返回新版本号；账户不存在抛出 `KeyError`。写入 0 不是删除。
+- `apply(transaction) -> int` 原子提交一批 `{"set": {账户: 余额}, "delete": [账户]}`，返回新版本号。非空批次整体成功后版本号只增 1；空批次（两字段省略或为空）返回当前版本号且不写状态文件。校验全部先于写入：非对象、额外键、容器或值类型错误（布尔值不算整数）、非法账户名、重复删除、set/delete 同名抛出 `ValueError`；删除不存在账户抛出 `KeyError`，两种情况下状态均无可见变化。
 - `version() -> int` 当前版本号。
 - `state_root() -> str` 当前全部账户的状态根（十六进制）。
 - `prove(account) -> dict` 该账户的包含证明。

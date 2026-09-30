@@ -59,6 +59,64 @@ class State:
         self._write(document)
         return document["version"]
 
+    def apply(self, transaction: dict) -> int:
+        """Apply one ``{"set": ..., "delete": ...}`` batch and return the new version.
+
+        ``set`` maps non-empty account names to non-negative integer balances (booleans
+        are rejected); ``delete`` is an array of distinct non-empty account names, none
+        of which may also appear in ``set``. Either field may be omitted or empty; an
+        empty batch returns the current version without touching the state file.
+
+        Every check runs before any write, so a rejected batch (``ValueError`` for a
+        malformed transaction, ``KeyError`` for a deleted account that does not exist)
+        leaves the state unchanged. A non-empty batch commits atomically and bumps the
+        version exactly once.
+        """
+        if not isinstance(transaction, dict):
+            raise ValueError("transaction must be a JSON object")
+        extra = set(transaction) - {"set", "delete"}
+        if extra:
+            raise ValueError(f"unexpected transaction fields: {', '.join(sorted(extra))}")
+        sets = transaction.get("set", {})
+        deletes = transaction.get("delete", [])
+        if not isinstance(sets, dict):
+            raise ValueError("transaction field 'set' must be an object")
+        if not isinstance(deletes, list):
+            raise ValueError("transaction field 'delete' must be an array")
+
+        for name, balance in sets.items():
+            if not isinstance(name, str) or not name:
+                raise ValueError("account must be a non-empty string")
+            if not isinstance(balance, int) or isinstance(balance, bool) or balance < 0:
+                raise ValueError("balance must be a non-negative integer")
+
+        seen: set[str] = set()
+        for name in deletes:
+            if not isinstance(name, str) or not name:
+                raise ValueError("account must be a non-empty string")
+            if name in seen:
+                raise ValueError(f"duplicate delete for account {name!r}")
+            seen.add(name)
+            if name in sets:
+                raise ValueError(f"account {name!r} appears in both set and delete")
+
+        document = self._read()
+        if not sets and not deletes:
+            return int(document["version"])
+
+        accounts = document["accounts"]
+        for name in deletes:
+            if name not in accounts:
+                raise KeyError(f"unknown account {name!r}")
+        # All checks passed; commit the batch as a single version.
+        for name, balance in sets.items():
+            accounts[name] = balance
+        for name in deletes:
+            del accounts[name]
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
     def get(self, account: str) -> int:
         """Balance of ``account``, or 0 when the account is unknown or was deleted."""
         return int(self._read()["accounts"].get(account, 0))

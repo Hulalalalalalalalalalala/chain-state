@@ -25,6 +25,8 @@ def _parser() -> argparse.ArgumentParser:
     write.add_argument("balance", type=int)
     delete = sub.add_parser("delete", help="remove an existing account")
     delete.add_argument("account")
+    apply = sub.add_parser("apply", help="apply one set/delete transaction from inline JSON (- for stdin)")
+    apply.add_argument("transaction", help="transaction JSON, or - to read it from stdin")
     read = sub.add_parser("get", help="read an account balance")
     read.add_argument("account")
     sub.add_parser("root", help="print the state root")
@@ -54,6 +56,9 @@ def main(argv: list[str] | None = None) -> int:
             print(state.set(args.account, args.balance))
         elif args.command == "delete":
             print(state.delete(args.account))
+        elif args.command == "apply":
+            raw = sys.stdin.read() if args.transaction == "-" else args.transaction
+            print(state.apply(json.loads(raw)))
         elif args.command == "get":
             print(state.get(args.account))
         elif args.command == "root":
