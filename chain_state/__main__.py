@@ -50,6 +50,9 @@ def _parser() -> argparse.ArgumentParser:
     prove_range = sub.add_parser("prove-range", help="print an ascending index-range proof as JSON")
     prove_range.add_argument("start", type=_non_negative_int)
     prove_range.add_argument("end", type=_non_negative_int)
+    prove_name_range = sub.add_parser("prove-name-range", help="print a name half-range proof as JSON")
+    prove_name_range.add_argument("start")
+    prove_name_range.add_argument("end")
     verify = sub.add_parser("verify", help="verify an inclusion proof")
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
@@ -64,6 +67,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_range.add_argument("start", type=_non_negative_int)
     verify_range.add_argument("end", type=_non_negative_int)
     verify_range.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_name_range = sub.add_parser("verify-name-range", help="verify a name half-range proof")
+    verify_name_range.add_argument("start")
+    verify_name_range.add_argument("end")
+    verify_name_range.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -94,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(state.prove_prefix(args.count), sort_keys=True))
         elif args.command == "prove-range":
             print(json.dumps(state.prove_range(args.start, args.end), sort_keys=True))
+        elif args.command == "prove-name-range":
+            print(json.dumps(state.prove_name_range(args.start, args.end), sort_keys=True))
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
@@ -112,6 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-range":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify_range(args.start, args.end, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-name-range":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            ok = state.verify_name_range(args.start, args.end, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":
