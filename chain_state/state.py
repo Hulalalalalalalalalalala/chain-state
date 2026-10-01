@@ -17,12 +17,48 @@ from .merkle import leaf_hash, merkle_proof, merkle_root, node_hash
 __all__ = ["State"]
 
 STATE_FILE = "state.json"
+SNAPSHOTS_KEY = "snapshots"
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
 
 def _leaf(account: str, balance: int) -> bytes:
     return leaf_hash(f"{account}:{balance}".encode("utf-8"))
+
+
+def _root_for(accounts: dict) -> str:
+    """Hex state root over ``accounts`` sorted by name; the root depends only on contents."""
+    leaves = [_leaf(name, int(accounts[name])) for name in sorted(accounts)]
+    return merkle_root(leaves).hex()
+
+
+def _validate_snapshot(snapshot: object) -> dict:
+    """Validate one persisted snapshot and return an independent, normalized copy.
+
+    A snapshot carries exactly ``accounts`` (non-empty account names to non-negative
+    JSON integers), ``version`` (a non-negative JSON integer) and ``root`` (64 lowercase
+    hex characters that recomputes from ``accounts``). Missing fields, type confusion
+    or a mismatched root raise ``ValueError``.
+    """
+    if not isinstance(snapshot, dict) or set(snapshot) != {"accounts", "version", "root"}:
+        raise ValueError("corrupt snapshot: expected exactly accounts, version and root")
+    raw_accounts = snapshot["accounts"]
+    if not isinstance(raw_accounts, dict):
+        raise ValueError("corrupt snapshot: accounts must be a JSON object")
+    accounts: dict[str, int] = {}
+    for name, balance in raw_accounts.items():
+        if not isinstance(name, str) or not name or not _is_int(balance) or balance < 0:
+            raise ValueError("corrupt snapshot: accounts must map non-empty names to non-negative integers")
+        accounts[name] = balance
+    version = snapshot["version"]
+    if not _is_int(version) or version < 0:
+        raise ValueError("corrupt snapshot: version must be a non-negative integer")
+    root = snapshot["root"]
+    if not _is_hex64(root):
+        raise ValueError("corrupt snapshot: root must be 64 lowercase hexadecimal characters")
+    if _root_for(accounts) != root:
+        raise ValueError("corrupt snapshot: root does not match accounts")
+    return {"accounts": accounts, "version": version, "root": root}
 
 
 def _is_int(value: object) -> bool:
@@ -111,6 +147,20 @@ class State:
     def _write(self, document: dict) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path.write_text(json.dumps(document, sort_keys=True, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _snapshots(document: dict) -> dict:
+        """The snapshot collection, treating a state file without one as empty.
+
+        A missing key is added to ``document`` so callers can persist new snapshots;
+        a present-but-wrong-typed value is treated as corruption.
+        """
+        if SNAPSHOTS_KEY not in document:
+            document[SNAPSHOTS_KEY] = {}
+        snapshots = document[SNAPSHOTS_KEY]
+        if not isinstance(snapshots, dict):
+            raise ValueError("corrupt snapshots: expected a JSON object")
+        return snapshots
 
     # -- public interface -------------------------------------------------------------
 
@@ -242,9 +292,62 @@ class State:
 
     def state_root(self) -> str:
         """Hex state root over every account, sorted by name."""
-        accounts = self._read()["accounts"]
-        leaves = [_leaf(name, int(accounts[name])) for name in sorted(accounts)]
-        return merkle_root(leaves).hex()
+        return _root_for(self._read()["accounts"])
+
+    def create_snapshot(self, label: str) -> int:
+        """Save the current accounts under ``label`` and return the pre-call version.
+
+        The snapshot holds an independent copy of the accounts together with the
+        version and state root in effect before the call; it never alters the current
+        accounts, version or root. ``label`` must be a non-empty string and a second
+        snapshot with the same name raises ``ValueError``.
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError("label must be a non-empty string")
+        document = self._read()
+        accounts = document["accounts"]
+        snapshots = self._snapshots(document)
+        if label in snapshots:
+            raise ValueError(f"snapshot {label!r} already exists")
+        version = int(document["version"])
+        snapshots[label] = {"accounts": {name: int(balance) for name, balance in accounts.items()},
+                            "version": version, "root": _root_for(accounts)}
+        self._write(document)
+        return version
+
+    def restore_snapshot(self, label: str) -> int:
+        """Replace the current accounts with the snapshot named ``label`` and return the new version.
+
+        The restored root strictly equals the snapshot root and the version advances
+        exactly once even when the accounts are unchanged; the snapshot itself is
+        never modified and may be restored repeatedly. An unknown label raises
+        ``KeyError``; a non-string or empty label raises ``ValueError``, as does a
+        snapshot missing fields, carrying wrong types or whose root does not
+        recompute from its accounts. Every check runs before the write, so a failed
+        restore changes neither the accounts, version, root nor the snapshots.
+        """
+        if not isinstance(label, str) or not label:
+            raise ValueError("label must be a non-empty string")
+        document = self._read()
+        snapshots = self._snapshots(document)
+        if label not in snapshots:
+            raise KeyError(f"unknown snapshot {label!r}")
+        saved = _validate_snapshot(snapshots[label])
+        document["accounts"] = {name: balance for name, balance in saved["accounts"].items()}
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
+    def list_snapshots(self) -> dict:
+        """Independent copies of every snapshot, keyed by label and sorted by name.
+
+        Each value holds exactly ``accounts`` (name to non-negative integer balance),
+        ``version`` (the version when the snapshot was taken) and ``root`` (64
+        lowercase hex characters); the returned mapping is read from but never
+        aliases persisted state.
+        """
+        snapshots = self._snapshots(self._read())
+        return {label: _validate_snapshot(snapshots[label]) for label in sorted(snapshots)}
 
     def prove(self, account: str) -> dict:
         """Inclusion proof for ``account``."""

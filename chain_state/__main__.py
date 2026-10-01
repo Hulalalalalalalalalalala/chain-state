@@ -56,6 +56,11 @@ def _parser() -> argparse.ArgumentParser:
     read = sub.add_parser("get", help="read an account balance")
     read.add_argument("account")
     sub.add_parser("root", help="print the state root")
+    snapshot = sub.add_parser("snapshot", help="save the current accounts under a label")
+    snapshot.add_argument("label")
+    restore = sub.add_parser("restore", help="replace the current accounts with a saved snapshot")
+    restore.add_argument("label")
+    sub.add_parser("snapshots", help="print every saved snapshot as JSON")
     prove = sub.add_parser("prove", help="print an inclusion proof as JSON")
     prove.add_argument("account")
     prove_absence = sub.add_parser("prove-absence", help="print an absence proof as JSON")
@@ -110,6 +115,12 @@ def main(argv: list[str] | None = None) -> int:
             print(state.get(args.account))
         elif args.command == "root":
             print(state.state_root())
+        elif args.command == "snapshot":
+            print(state.create_snapshot(args.label))
+        elif args.command == "restore":
+            print(state.restore_snapshot(args.label))
+        elif args.command == "snapshots":
+            print(json.dumps(state.list_snapshots(), sort_keys=True))
         elif args.command == "prove":
             print(json.dumps(state.prove(args.account), sort_keys=True))
         elif args.command == "prove-absence":
