@@ -86,6 +86,11 @@ def _parser() -> argparse.ArgumentParser:
     verify_name_range.add_argument("start")
     verify_name_range.add_argument("end")
     verify_name_range.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    snapshot = sub.add_parser("snapshot", help="persist the current accounts under a label")
+    snapshot.add_argument("label")
+    restore = sub.add_parser("restore", help="restore the accounts saved under a label")
+    restore.add_argument("label")
+    sub.add_parser("snapshots", help="print every snapshot as JSON, sorted by label")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -145,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
             ok = state.verify_name_range(args.start, args.end, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
+        elif args.command == "snapshot":
+            print(state.create_snapshot(args.label))
+        elif args.command == "restore":
+            print(state.restore_snapshot(args.label))
+        elif args.command == "snapshots":
+            print(json.dumps(state.list_snapshots(), sort_keys=True))
         elif args.command == "report":
             print(json.dumps({"domain": DOMAIN, "version": __version__, "sourceCategories": list(SOURCE_CATEGORIES),
                               "tags": _tags(), "components": ["state", "merkle"],

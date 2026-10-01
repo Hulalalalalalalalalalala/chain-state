@@ -29,13 +29,18 @@ python3 -m chain_state --root ./state prove-range 1 3
 python3 -m chain_state --root ./state verify-range 1 3 <proof>
 python3 -m chain_state --root ./state prove-name-range c e
 python3 -m chain_state --root ./state verify-name-range c e <proof>
+python3 -m chain_state --root ./state snapshot checkpoint
+python3 -m chain_state --root ./state restore checkpoint
+python3 -m chain_state --root ./state snapshots
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
+
+`snapshot <label>` 输出调用前版本号，`restore <label>` 输出恢复后的新版本号，`snapshots` 输出按 label 稳定排序的快照 JSON。label 非法、重复创建、未知恢复或快照损坏以 2 退出，未 init 以 1 退出。
 
 ## 公开接口
 
@@ -59,6 +64,11 @@ python3 -m chain_state --root ./state verify-name-range c e <proof>
 - `verify_range(start, end, proof) -> bool` 仅凭证明验证名称升序的连续索引区间，不读取状态目录；参数非法或任何不一致均返回 `False`。
 - `prove_name_range(start, end) -> dict` 账户名称半开区间 `start <= account < end` 的区间证明，区间允许为空；`start`、`end` 须为非空字符串且 `start < end`，否则抛 `ValueError`。证明只含 `start`、`end`、`root`、`size`、`prev`、`next`、`items`：items 升序覆盖区间内全部账户（完整列表序号），prev/next 为 `start` 前一账户与 `end` 后一账户（端点外为 `null`），items 填满二者之间的序号空档；空状态无边界、无 items。
 - `verify_name_range(start, end, proof) -> bool` 仅凭证明验证名称半开区间，不读取状态目录；参数非法、字段缺失或多余、名称或边界错误、items 断裂、路径不能重算 root 等任何不一致均返回 `False`。
+- `create_snapshot(label) -> int` 以 `label`（非空字符串，否则抛 `ValueError`）保存当前 accounts 的独立副本，以及调用前的 version 与 root，并返回调用前 version；不改变当前账户、版本或状态根，同名快照已存在抛 `ValueError`。
+- `restore_snapshot(label) -> int` 用 `label` 快照的 accounts 完整替换当前账户映射，使状态根严格等于快照 root；版本号只增加一次并返回新版本，即使内容相同也增加；快照本身保持不变、可重复恢复。`label` 非法抛 `ValueError`，未知 label 抛 `KeyError`，快照缺字段、类型错误或 root 无法由 accounts 重算抛 `ValueError`；任何失败都不改变账户、版本、状态根或快照集合。
+- `list_snapshots() -> dict` 只读返回按 label 排序的独立副本，每个值只含 `accounts`、`version`、`root`：accounts 为账户名到非负整数余额的映射，version 为创建时版本，root 为 64 个小写十六进制字符。
+
+快照随 `state.json` 持久化（`snapshots` 字段）；没有该字段的旧状态文件按空快照集合读取，状态根仍只由账户与余额决定。
 
 ### 前缀证明
 

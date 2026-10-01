@@ -35,6 +35,12 @@ def _is_hex64(value: object) -> bool:
     return isinstance(value, str) and _HEX64.fullmatch(value) is not None
 
 
+def _accounts_root(accounts: dict) -> str:
+    """Hex state root over ``accounts`` sorted by name; the root depends only on names and balances."""
+    leaves = [_leaf(name, int(accounts[name])) for name in sorted(accounts)]
+    return merkle_root(leaves).hex()
+
+
 def _proof_path(index: int, size: int, path: object) -> list[dict] | None:
     """Validate a sibling path isomorphic to one :func:`merkle_proof` emits.
 
@@ -242,9 +248,112 @@ class State:
 
     def state_root(self) -> str:
         """Hex state root over every account, sorted by name."""
-        accounts = self._read()["accounts"]
-        leaves = [_leaf(name, int(accounts[name])) for name in sorted(accounts)]
-        return merkle_root(leaves).hex()
+        return _accounts_root(self._read()["accounts"])
+
+    # -- snapshots --------------------------------------------------------------------
+
+    @staticmethod
+    def _check_label(label: object) -> None:
+        """A snapshot label must be a non-empty string."""
+        if not isinstance(label, str) or not label:
+            raise ValueError("snapshot label must be a non-empty string")
+
+    @staticmethod
+    def _valid_accounts(accounts: object) -> dict | None:
+        """A JSON object mapping non-empty account names to non-negative JSON integers."""
+        if not isinstance(accounts, dict):
+            return None
+        for name, balance in accounts.items():
+            if not isinstance(name, str) or not name or not _is_int(balance) or balance < 0:
+                return None
+        return accounts
+
+    def _checked_snapshots(self, document: dict) -> dict:
+        """Return the document's snapshot mapping, tolerating its absence but not a malformed one.
+
+        A state file written before snapshots existed simply has no ``snapshots`` field and
+        is read as an empty collection. A field that is not an object means corruption.
+        """
+        snapshots = document.get("snapshots", {})
+        if not isinstance(snapshots, dict):
+            raise ValueError("stored snapshots are not a JSON object")
+        return snapshots
+
+    def create_snapshot(self, label: str) -> int:
+        """Persist the current accounts under ``label`` without changing the live state.
+
+        Saves an independent copy of the accounts together with the version and state
+        root in effect *before* the call, and returns that version. The live accounts,
+        version and root are untouched; a duplicate label raises ``ValueError`` and a
+        non-string/empty label too.
+        """
+        self._check_label(label)
+        document = self._read()
+        snapshots = self._checked_snapshots(document)
+        if label in snapshots:
+            raise ValueError(f"snapshot {label!r} already exists")
+        version = int(document["version"])
+        accounts = document["accounts"]
+        record = {"accounts": {name: int(balance) for name, balance in accounts.items()},
+                  "version": version, "root": _accounts_root(accounts)}
+        snapshots[label] = record
+        document["snapshots"] = snapshots
+        self._write(document)
+        return version
+
+    def restore_snapshot(self, label: str) -> int:
+        """Replace the live accounts with the snapshot stored under ``label``.
+
+        The snapshot's accounts completely replace the current mapping, so the state root
+        becomes exactly the snapshot's recorded root. The version is increased exactly
+        once (even when the restored contents are identical to the current ones) and the
+        new version returned. The snapshot itself is copied, never mutated, so it can be
+        restored repeatedly. An unknown label raises ``KeyError``; a non-string/empty
+        label or a snapshot missing fields, carrying wrong types or recording a root that
+        cannot be recomputed from its accounts raises ``ValueError``. Every failure
+        leaves the accounts, version, root and snapshot set unchanged.
+        """
+        self._check_label(label)
+        document = self._read()
+        snapshots = self._checked_snapshots(document)
+        if label not in snapshots:
+            raise KeyError(f"unknown snapshot {label!r}")
+        record = snapshots[label]
+        if not isinstance(record, dict) or set(record) != {"accounts", "version", "root"}:
+            raise ValueError(f"snapshot {label!r} is missing fields or carries extra ones")
+        accounts = self._valid_accounts(record["accounts"])
+        if accounts is None:
+            raise ValueError(f"snapshot {label!r} does not hold valid accounts")
+        version = record["version"]
+        root = record["root"]
+        if not _is_int(version) or not _is_hex64(root) or _accounts_root(accounts) != root:
+            raise ValueError(f"snapshot {label!r} is corrupted")
+        document["accounts"] = {name: int(balance) for name, balance in accounts.items()}
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
+    def list_snapshots(self) -> dict:
+        """Independent copies of every snapshot, keyed by label and sorted by label.
+
+        Each value holds only ``accounts`` (name to non-negative integer balance),
+        ``version`` (the version when the snapshot was created) and ``root`` (64 lowercase
+        hex characters). Read-only: mutating the result never touches persisted state.
+        """
+        snapshots = self._checked_snapshots(self._read())
+        ordered: dict = {}
+        for label in sorted(snapshots):
+            record = snapshots[label]
+            if (not isinstance(record, dict) or set(record) != {"accounts", "version", "root"}
+                    or not isinstance(record["accounts"], dict)
+                    or not all(isinstance(name, str) and name and _is_int(balance) and balance >= 0
+                               for name, balance in record["accounts"].items())
+                    or not _is_int(record["version"]) or not _is_hex64(record["root"])):
+                raise ValueError(f"snapshot {label!r} is corrupted")
+            ordered[label] = {"accounts": {name: int(balance)
+                                           for name, balance in record["accounts"].items()},
+                              "version": int(record["version"]), "root": record["root"]}
+        return ordered
 
     def prove(self, account: str) -> dict:
         """Inclusion proof for ``account``."""
