@@ -22,6 +22,30 @@ def _leaf(account: str, balance: int) -> bytes:
     return leaf_hash(f"{account}:{balance}".encode("utf-8"))
 
 
+def _is_int(value: object) -> bool:
+    """True for real integers; booleans are not integers here."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_hash(value: object) -> bool:
+    """True for exactly 64 lowercase hexadecimal characters."""
+    return isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+def _valid_path(path: object, size: int) -> bool:
+    """True when ``path`` has the exact shape the generator produces for ``size`` leaves."""
+    if not isinstance(path, list) or len(path) != (size - 1).bit_length():
+        return False
+    for step in path:
+        if not isinstance(step, dict) or set(step) != {"side", "hash"}:
+            return False
+        if step["side"] not in ("left", "right"):
+            return False
+        if not _is_hash(step["hash"]):
+            return False
+    return True
+
+
 class State:
     """A single-process account state machine rooted at ``root``."""
 
@@ -156,14 +180,37 @@ class State:
                 "root": self.state_root(), "path": merkle_proof([_leaf(n, int(accounts[n])) for n in names], names.index(account))}
 
     def verify(self, account: str, balance: int, proof: dict) -> bool:
-        """Verify ``account``/``balance`` against ``proof`` alone, without reading the state."""
+        """Verify ``account``/``balance`` against ``proof`` alone, without reading the state.
+
+        Only proofs isomorphic to what ``prove`` generates are accepted: the exact key
+        set, non-boolean integers, a positive size, an in-range index, lowercase hex
+        hashes, and a path whose depth matches the tree size. Anything else, any
+        tampering, or a root mismatch returns False; the state directory is never read.
+        """
         try:
-            if proof["account"] != account or int(proof["balance"]) != int(balance):
+            if not isinstance(account, str) or not account:
                 return False
-            if int(proof["index"]) >= int(proof["size"]):
+            if not _is_int(balance) or balance < 0:
                 return False
-            return verify_proof(_leaf(account, int(balance)), int(proof["index"]), proof["path"], str(proof["root"]))
-        except (KeyError, TypeError, ValueError):
+            if not isinstance(proof, dict) or set(proof) != {"account", "balance", "index", "size", "root", "path"}:
+                return False
+            if proof["account"] != account:
+                return False
+            if not _is_int(proof["balance"]) or proof["balance"] < 0 or proof["balance"] != balance:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 1:
+                return False
+            index = proof["index"]
+            if not _is_int(index) or not 0 <= index < size:
+                return False
+            root = proof["root"]
+            if not _is_hash(root):
+                return False
+            if not _valid_path(proof["path"], size):
+                return False
+            return verify_proof(_leaf(account, balance), index, proof["path"], root)
+        except (KeyError, TypeError, ValueError, IndexError):
             return False
 
     def prove_absence(self, account: str) -> dict:
@@ -200,51 +247,66 @@ class State:
     def verify_absence(self, account: str, proof: dict) -> bool:
         """Verify an absence proof using the proof alone; no state directory is read.
 
-        Returns False (never raises) when the proof was tampered with, the root does not
-        match, or the boundary indices do not close tightly around ``account``.
+        Only proofs isomorphic to what ``prove_absence`` generates are accepted: the
+        exact key set, a non-negative integer size, a lowercase hex root, and
+        boundaries that are either null or objects with exactly ``account``,
+        ``balance``, ``index`` and ``path`` validated like an inclusion proof.
+        Boundaries must strictly bracket ``account`` with adjacent (or fixed first /
+        last) indices and both paths must recompute the same root. Any inconsistency
+        returns False; this method never raises.
         """
         try:
-            if proof["account"] != account or not isinstance(account, str) or not account:
+            if not isinstance(account, str) or not account:
                 return False
-            size = int(proof["size"])
-            if size < 0:
+            if not isinstance(proof, dict) or set(proof) != {"account", "root", "size", "prev", "next"}:
                 return False
-            root = str(proof["root"])
-            bytes.fromhex(root)
-
-            previous, following = proof.get("prev"), proof.get("next")
+            if proof["account"] != account:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 0:
+                return False
+            root = proof["root"]
+            if not _is_hash(root):
+                return False
+            previous, following = proof["prev"], proof["next"]
 
             if size == 0:
                 return previous is None and following is None and root == merkle_root([]).hex()
             if previous is None and following is None:
                 return False
 
-            def check_boundary(boundary: object, expected_index: int, relation: str) -> None:
-                if not isinstance(boundary, dict):
-                    raise ValueError("missing boundary")
-                name = boundary["account"]
-                balance = int(boundary["balance"])
-                index = int(boundary["index"])
-                path = boundary["path"]
-                if not isinstance(name, str) or index != expected_index or not 0 <= index < size:
+            def boundary_index(boundary: object) -> int:
+                if not isinstance(boundary, dict) or set(boundary) != {"account", "balance", "index", "path"}:
                     raise ValueError("bad boundary")
+                index = boundary["index"]
+                if not _is_int(index) or not 0 <= index < size:
+                    raise ValueError("bad boundary index")
+                return index
+
+            def check_boundary(boundary: dict, relation: str) -> None:
+                name = boundary["account"]
+                balance = boundary["balance"]
+                if not isinstance(name, str) or not name:
+                    raise ValueError("bad boundary account")
+                if not _is_int(balance) or balance < 0:
+                    raise ValueError("bad boundary balance")
                 # The duplicated-last-node tree pins the path depth to the tree size.
-                if not isinstance(path, list) or len(path) != (size - 1).bit_length():
+                if not _valid_path(boundary["path"], size):
                     raise ValueError("path depth does not match size")
                 ordered = name < account if relation == "prev" else name > account
                 if not ordered:
                     raise ValueError("boundary does not close")
-                if not verify_proof(_leaf(name, balance), index, path, root):
+                if not verify_proof(_leaf(name, balance), boundary["index"], boundary["path"], root):
                     raise ValueError("bad boundary path")
 
-            prev_index = int(previous["index"]) if previous is not None else -1
-            next_index = int(following["index"]) if following is not None else size
+            prev_index = boundary_index(previous) if previous is not None else -1
+            next_index = boundary_index(following) if following is not None else size
             if next_index != prev_index + 1:
                 return False
             if previous is not None:
-                check_boundary(previous, prev_index, "prev")
+                check_boundary(previous, "prev")
             if following is not None:
-                check_boundary(following, next_index, "next")
+                check_boundary(following, "next")
             return True
         except (KeyError, TypeError, ValueError, IndexError):
             return False
