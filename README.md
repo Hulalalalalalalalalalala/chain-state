@@ -26,11 +26,13 @@ python3 -m chain_state --root ./state prove-prefix 3
 python3 -m chain_state --root ./state verify-prefix 3 <proof>
 python3 -m chain_state --root ./state prove-range 1 3
 python3 -m chain_state --root ./state verify-range 1 3 <proof>
+python3 -m chain_state --root ./state prove-name-range alice carol
+python3 -m chain_state --root ./state verify-name-range alice carol <proof>
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -53,6 +55,8 @@ python3 -m chain_state --root ./state verify-range 1 3 <proof>
 - `verify_prefix(count, proof) -> bool` 仅凭证明验证名称升序连续前缀，不读取状态目录；`count` 非法或任何不一致均返回 `False`。
 - `prove_range(start, end) -> dict` 名称升序索引半开区间 `[start, end)` 的连续区间证明；`start`、`end` 须为非负 JSON 整数且满足 `start < end <= 账户数`，否则抛 `ValueError`。
 - `verify_range(start, end, proof) -> bool` 仅凭证明验证名称升序的连续索引区间，不读取状态目录；参数非法或任何不一致均返回 `False`。
+- `prove_name_range(start, end) -> dict` 名称半开区间 `[start, end)` 的区间证明；`start`、`end` 为非空字符串且 `start < end`，不要求账户存在，否则抛 `ValueError`。
+- `verify_name_range(start, end, proof) -> bool` 仅凭证明验证名称区间（含空区间），不读取状态目录；参数非法或任何不一致均返回 `False`。
 
 ### 前缀证明
 

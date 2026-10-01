@@ -410,6 +410,143 @@ class State:
         except (KeyError, TypeError, ValueError):
             return False
 
+    def prove_name_range(self, start: str, end: str) -> dict:
+        """Inclusion proof for every account in the name range ``[start, end)``.
+
+        The bounds are non-empty account names with ``start < end``; neither needs to
+        exist. The proof carries the state root, the full tree size, one inclusion item
+        per account inside the range (exactly ``account``, ``balance``, ``index`` and
+        ``path``, ascending by name with continuous full-list indices), and the
+        predecessor/successor boundaries bracketing the range: ``prev`` is the last
+        account before ``start``, ``next`` the first account at or after ``end``, each
+        null when the range touches that end of the account order. An empty range is
+        proven by adjacent boundaries (or null endpoints); an empty state has no
+        boundaries and no items.
+        """
+        if (not isinstance(start, str) or not isinstance(end, str)
+                or not start or not end or not start < end):
+            raise ValueError("name range requires non-empty strings with start < end")
+        document = self._read()
+        accounts = document["accounts"]
+        names = sorted(accounts)
+        root = self.state_root()
+        leaves = [_leaf(n, int(accounts[n])) for n in names]
+        first = bisect.bisect_left(names, start)
+        last = bisect.bisect_left(names, end)
+
+        def entry(index: int) -> dict:
+            return {"account": names[index], "balance": int(accounts[names[index]]),
+                    "index": index, "path": merkle_proof(leaves, index)}
+
+        items = [entry(i) for i in range(first, last)]
+        previous = entry(first - 1) if first > 0 else None
+        following = entry(last) if last < len(names) else None
+        return {"start": start, "end": end, "root": root, "size": len(names),
+                "prev": previous, "next": following, "items": items}
+
+    def verify_name_range(self, start: str, end: str, proof: object) -> bool:
+        """Verify a name-range proof using the proof alone; no state is read.
+
+        Only a proof isomorphic to one :meth:`prove_name_range` emits is accepted: a
+        JSON object with exactly ``start``, ``end``, ``root``, ``size``, ``prev``,
+        ``next`` and ``items``. The arguments ``start``/``end`` must be non-empty
+        strings with ``start < end`` and match the proof's own bounds. Each boundary
+        is either null or an object holding exactly ``account``, ``balance``, ``index``
+        and ``path``, validated like an inclusion proof, with ``prev`` strictly before
+        ``start`` and ``next`` at or after ``end``. Items must lie inside
+        ``[start, end)``, strictly ascending by non-empty name, with non-negative
+        integer balances and continuous indices filling the gap between the boundary
+        indices (or the tree ends when a boundary is null); every path must recompute
+        the one root over a tree of ``size`` leaves. With ``size`` 0 both boundaries
+        must be null, items empty, and the root the empty-tree root. Any mismatch,
+        type confusion, encoding oddity, broken adjacency or non-closing path returns
+        False.
+        """
+        try:
+            if (not isinstance(start, str) or not isinstance(end, str)
+                    or not start or not end or not start < end):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {
+                "start", "end", "root", "size", "prev", "next", "items"
+            }:
+                return False
+            if proof["start"] != start or proof["end"] != end:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 0:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root):
+                return False
+            items = proof["items"]
+            if not isinstance(items, list):
+                return False
+            previous, following = proof["prev"], proof["next"]
+
+            if size == 0:
+                return (previous is None and following is None and not items
+                        and root == merkle_root([]).hex())
+
+            prev_index = -1
+            if previous is not None:
+                if not isinstance(previous, dict) or set(previous) != {"account", "balance", "index", "path"}:
+                    return False
+                name = previous["account"]
+                if not isinstance(name, str) or not name or not name < start:
+                    return False
+                balance = previous["balance"]
+                if not _is_int(balance) or balance < 0:
+                    return False
+                prev_index = previous["index"]
+                if not _is_int(prev_index) or not 0 <= prev_index < size:
+                    return False
+                path = _proof_path(prev_index, size, previous["path"])
+                if path is None or not _recompute_root(_leaf(name, balance), prev_index, path, root):
+                    return False
+
+            next_index = size
+            if following is not None:
+                if not isinstance(following, dict) or set(following) != {"account", "balance", "index", "path"}:
+                    return False
+                name = following["account"]
+                if not isinstance(name, str) or not name or not end <= name:
+                    return False
+                balance = following["balance"]
+                if not _is_int(balance) or balance < 0:
+                    return False
+                next_index = following["index"]
+                if not _is_int(next_index) or not 0 <= next_index < size:
+                    return False
+                path = _proof_path(next_index, size, following["path"])
+                if path is None or not _recompute_root(_leaf(name, balance), next_index, path, root):
+                    return False
+
+            # Items must fill the index gap between the boundaries exactly.
+            first = prev_index + 1
+            if len(items) != next_index - first:
+                return False
+            earlier: str | None = None
+            for offset, item in enumerate(items):
+                index = first + offset
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index", "path"}:
+                    return False
+                name = item["account"]
+                if (not isinstance(name, str) or not name or not start <= name < end
+                        or (earlier is not None and not earlier < name)):
+                    return False
+                balance = item["balance"]
+                if not _is_int(balance) or balance < 0:
+                    return False
+                if not _is_int(item["index"]) or item["index"] != index:
+                    return False
+                path = _proof_path(index, size, item["path"])
+                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                    return False
+                earlier = name
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def prove_absence(self, account: str) -> dict:
         """Absence proof for an account that does not currently exist.
 
