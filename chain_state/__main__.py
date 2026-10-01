@@ -47,6 +47,9 @@ def _parser() -> argparse.ArgumentParser:
     prove_absence.add_argument("account")
     prove_prefix = sub.add_parser("prove-prefix", help="print an ascending name-prefix proof as JSON")
     prove_prefix.add_argument("count", type=_non_negative_int)
+    prove_range = sub.add_parser("prove-range", help="print an ascending index-range proof as JSON")
+    prove_range.add_argument("start", type=_non_negative_int)
+    prove_range.add_argument("end", type=_non_negative_int)
     verify = sub.add_parser("verify", help="verify an inclusion proof")
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
@@ -57,6 +60,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_prefix = sub.add_parser("verify-prefix", help="verify an ascending name-prefix proof")
     verify_prefix.add_argument("count", type=_non_negative_int)
     verify_prefix.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_range = sub.add_parser("verify-range", help="verify an ascending index-range proof")
+    verify_range.add_argument("start", type=_non_negative_int)
+    verify_range.add_argument("end", type=_non_negative_int)
+    verify_range.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -85,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(state.prove_absence(args.account), sort_keys=True))
         elif args.command == "prove-prefix":
             print(json.dumps(state.prove_prefix(args.count), sort_keys=True))
+        elif args.command == "prove-range":
+            print(json.dumps(state.prove_range(args.start, args.end), sort_keys=True))
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
@@ -98,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-prefix":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify_prefix(args.count, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-range":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            ok = state.verify_range(args.start, args.end, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":
