@@ -15,6 +15,17 @@ from .state import State
 USAGE_ERROR = 2
 
 
+def _non_negative_int(text: str) -> int:
+    """argparse type: exactly a non-negative JSON integer (booleans rejected)."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a non-negative JSON integer, got {text!r}")
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise argparse.ArgumentTypeError(f"expected a non-negative JSON integer, got {text!r}")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chain_state", description="Account state machine with a verifiable state root")
     parser.add_argument("--root", required=True, help="state directory")
@@ -34,6 +45,8 @@ def _parser() -> argparse.ArgumentParser:
     prove.add_argument("account")
     prove_absence = sub.add_parser("prove-absence", help="print an absence proof as JSON")
     prove_absence.add_argument("account")
+    prove_prefix = sub.add_parser("prove-prefix", help="print an ascending name-prefix proof as JSON")
+    prove_prefix.add_argument("count", type=_non_negative_int)
     verify = sub.add_parser("verify", help="verify an inclusion proof")
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
@@ -41,6 +54,9 @@ def _parser() -> argparse.ArgumentParser:
     verify_absence = sub.add_parser("verify-absence", help="verify an absence proof")
     verify_absence.add_argument("account")
     verify_absence.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_prefix = sub.add_parser("verify-prefix", help="verify an ascending name-prefix proof")
+    verify_prefix.add_argument("count", type=_non_negative_int)
+    verify_prefix.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -67,6 +83,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(state.prove(args.account), sort_keys=True))
         elif args.command == "prove-absence":
             print(json.dumps(state.prove_absence(args.account), sort_keys=True))
+        elif args.command == "prove-prefix":
+            print(json.dumps(state.prove_prefix(args.count), sort_keys=True))
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
@@ -75,6 +93,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-absence":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify_absence(args.account, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-prefix":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            ok = state.verify_prefix(args.count, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":

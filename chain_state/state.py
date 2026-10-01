@@ -256,6 +256,85 @@ class State:
         except (KeyError, TypeError, ValueError):
             return False
 
+    def prove_prefix(self, count: int) -> dict:
+        """Inclusion proof for the first ``count`` accounts in ascending name order.
+
+        The proof carries the state root, the full tree size, and one inclusion item per
+        account: exactly ``account``, ``balance``, ``index`` and ``path``, with indices
+        running continuously from 0. ``count`` must be a non-negative JSON integer no
+        larger than the number of accounts. A non-empty state cannot prove a zero-length
+        prefix because nothing anchors the root; only an empty state may prove count 0,
+        against the empty-tree root with no items.
+        """
+        if not _is_int(count) or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        document = self._read()
+        accounts = document["accounts"]
+        names = sorted(accounts)
+        root = self.state_root()
+        if count == 0:
+            if names:
+                raise ValueError("cannot prove an empty prefix over a non-empty state")
+            return {"count": 0, "root": root, "size": 0, "items": []}
+        if count > len(names):
+            raise ValueError(f"only {len(names)} accounts, cannot prove a prefix of {count}")
+        leaves = [_leaf(n, int(accounts[n])) for n in names]
+        items = [{"account": names[i], "balance": int(accounts[names[i]]), "index": i,
+                  "path": merkle_proof(leaves, i)} for i in range(count)]
+        return {"count": count, "root": root, "size": len(names), "items": items}
+
+    def verify_prefix(self, count: int, proof: object) -> bool:
+        """Verify an ascending name-prefix proof using the proof alone; no state is read.
+
+        Only a proof isomorphic to one :meth:`prove_prefix` emits is accepted: a JSON
+        object with exactly ``count``, ``root``, ``size`` and ``items``. The argument
+        ``count`` must be a non-negative JSON integer matching ``proof["count"]``,
+        ``size`` must be at least ``count``, and items must be strictly ascending by
+        non-empty name with continuous indices 0..count-1, non-negative integer
+        balances, and sibling paths that each recompute the one root over a tree of
+        ``size`` leaves. A zero count is anchored solely by the empty-tree root (size 0
+        and no items). Any mismatch, type confusion or broken path returns False.
+        """
+        try:
+            if not _is_int(count) or count < 0:
+                return False
+            if not isinstance(proof, dict) or set(proof) != {"count", "root", "size", "items"}:
+                return False
+            proven_count = proof["count"]
+            if not _is_int(proven_count) or proven_count != count:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < count:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root):
+                return False
+            items = proof["items"]
+            if not isinstance(items, list) or len(items) != count:
+                return False
+            if count == 0:
+                return size == 0 and root == merkle_root([]).hex()
+            previous: str | None = None
+            for position, item in enumerate(items):
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index", "path"}:
+                    return False
+                name = item["account"]
+                if not isinstance(name, str) or not name or (previous is not None and not previous < name):
+                    return False
+                balance = item["balance"]
+                index = item["index"]
+                if not _is_int(balance) or balance < 0:
+                    return False
+                if not _is_int(index) or index != position:
+                    return False
+                path = _proof_path(index, size, item["path"])
+                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                    return False
+                previous = name
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def prove_absence(self, account: str) -> dict:
         """Absence proof for an account that does not currently exist.
 
