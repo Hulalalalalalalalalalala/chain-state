@@ -22,11 +22,13 @@ python3 -m chain_state --root ./state apply '{"set": {"bob": 5}, "delete": ["ali
 echo '{"set": {"bob": 5}}' | python3 -m chain_state --root ./state apply -
 python3 -m chain_state --root ./state prove-absence alice
 python3 -m chain_state --root ./state verify-absence alice <proof>
+python3 -m chain_state --root ./state prove-prefix 2
+python3 -m chain_state --root ./state verify-prefix 2 <proof>
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -45,6 +47,16 @@ python3 -m chain_state --root ./state verify-absence alice <proof>
 - `verify(account, balance, proof) -> bool` 仅用证明与状态根验证。
 - `prove_absence(account) -> dict` 账户不存在证明；账户当前存在（含余额为 0）时抛出 `KeyError`。
 - `verify_absence(account, proof) -> bool` 仅凭证明验证账户不存在，不读取状态目录；任何不一致均返回 `False`。
+- `prove_prefix(count) -> dict` 名称升序前缀证明：给出从最小名称开始的连续 `count` 个账户与余额；`count` 为非法类型、负数或超过账户数时抛出 `ValueError`，非空状态下 `count` 为 0 无法锚定 root 同样抛出 `ValueError`。
+- `verify_prefix(count, proof) -> bool` 仅凭证明验证前缀，不读取状态目录；非法 `count` 或任何不一致均返回 `False`。
+
+### 前缀证明
+
+证明为可序列化 JSON，只含 `count`、`root`、`size`、`items`：
+
+- `items` 按名称严格升序，每项只含 `account`、`balance`、`index`、`path`，索引从 0 连续到 `count-1`，`path` 沿用包含证明的兄弟路径格式。
+- 验证方逐项重算同一 `root`，并核对名称升序、余额为非负整数、索引连续、`size >= count`。
+- 空状态的 `count` 0 生成并验证空 `items`，`root` 为空树根；非空状态的 `count` 0 无法锚定 root，生成抛 `ValueError`、验证返回 `False`。
 
 ### 不存在证明
 

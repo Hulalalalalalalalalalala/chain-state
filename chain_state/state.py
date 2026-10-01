@@ -341,3 +341,91 @@ class State:
             return True
         except (KeyError, TypeError, ValueError):
             return False
+
+    def prove_prefix(self, count: int) -> dict:
+        """Prefix proof for the ``count`` smallest accounts, in ascending name order.
+
+        The proof carries the state root, the full tree size and one inclusion item per
+        prefix account (index 0 through ``count - 1``), so a verifier can confirm the
+        accounts and balances starting from the smallest name without reading the state.
+        ``count`` must be a non-negative JSON integer no larger than the account count;
+        otherwise ``ValueError`` is raised. The sole exception to a positive ``count`` is
+        the empty state with ``count`` 0, anchored by the empty-tree root: over a non-empty
+        state a zero-length prefix cannot tie the root to anything, so it is rejected.
+        """
+        if not _is_int(count) or count < 0:
+            raise ValueError("count must be a non-negative integer")
+        document = self._read()
+        accounts = document["accounts"]
+        names = sorted(accounts)
+        size = len(names)
+        if count > size:
+            raise ValueError(f"state has {size} accounts, fewer than the requested prefix of {count}")
+        if count == 0:
+            if size > 0:
+                raise ValueError("count 0 cannot anchor the root of a non-empty state")
+            return {"count": 0, "root": merkle_root([]).hex(), "size": 0, "items": []}
+        leaves = [_leaf(name, int(accounts[name])) for name in names]
+        root = merkle_root(leaves).hex()
+        items = [
+            {"account": names[index], "balance": int(accounts[names[index]]), "index": index,
+             "path": merkle_proof(leaves, index)}
+            for index in range(count)
+        ]
+        return {"count": count, "root": root, "size": size, "items": items}
+
+    def verify_prefix(self, count: int, proof: object) -> bool:
+        """Verify a prefix proof using the proof alone; no state directory is read.
+
+        The proof is a JSON object with exactly ``count``, ``root``, ``size`` and
+        ``items``. ``count`` must equal the proof's own count and be a non-negative JSON
+        integer, ``size`` must be no smaller than ``count``, and ``items`` must hold
+        exactly ``count`` entries in strictly ascending account-name order. Each entry is
+        an inclusion item holding exactly ``account``, ``balance``, ``index`` and
+        ``path``: a non-empty name, a non-negative integer balance, an index consecutive
+        from 0, and a sibling path valid for the tree shape ``size`` implies; every item
+        must recompute the one root. The empty state with ``count`` 0 requires empty items
+        and the empty-tree root; ``count`` 0 over a positive size cannot anchor a root and
+        is rejected. An illegal ``count`` or any inconsistency returns False.
+        """
+        try:
+            if not _is_int(count) or count < 0:
+                return False
+            if not isinstance(proof, dict) or set(proof) != {"count", "root", "size", "items"}:
+                return False
+            if not _is_int(proof["count"]) or proof["count"] != count:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 0 or size < count:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root):
+                return False
+            items = proof["items"]
+            if not isinstance(items, list) or len(items) != count:
+                return False
+            if count == 0:
+                return size == 0 and root == merkle_root([]).hex()
+
+            previous_name: str | None = None
+            for position, item in enumerate(items):
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index", "path"}:
+                    return False
+                name = item["account"]
+                balance = item["balance"]
+                index = item["index"]
+                if not isinstance(name, str) or not name or not _is_int(balance) or balance < 0:
+                    return False
+                if previous_name is not None and not previous_name < name:
+                    return False
+                previous_name = name
+                if not _is_int(index) or index != position:
+                    return False
+                path = _proof_path(index, size, item["path"])
+                if path is None:
+                    return False
+                if not _recompute_root(_leaf(name, balance), index, path, root):
+                    return False
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
