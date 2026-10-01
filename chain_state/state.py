@@ -335,6 +335,80 @@ class State:
         except (KeyError, TypeError, ValueError):
             return False
 
+    def prove_range(self, start: int, end: int) -> dict:
+        """Inclusion proof for the half-open index range ``[start, end)``.
+
+        Indices address accounts in ascending name order. Both bounds must be
+        non-negative JSON integers with ``start < end <= len(accounts)``; any other
+        shape (negative, non-integer, empty or out-of-range interval) raises
+        ``ValueError``. The proof carries the state root, the full tree size, and one
+        inclusion item per account in the range: exactly ``account``, ``balance``,
+        ``index`` and ``path``, with indices running continuously from ``start``.
+        """
+        if not _is_int(start) or not _is_int(end) or start < 0 or end < 0 or start >= end:
+            raise ValueError("range requires non-negative integers with start < end")
+        document = self._read()
+        accounts = document["accounts"]
+        names = sorted(accounts)
+        if end > len(names):
+            raise ValueError(f"only {len(names)} accounts, cannot prove a range ending at {end}")
+        root = self.state_root()
+        leaves = [_leaf(n, int(accounts[n])) for n in names]
+        items = [{"account": names[i], "balance": int(accounts[names[i]]), "index": i,
+                  "path": merkle_proof(leaves, i)} for i in range(start, end)]
+        return {"start": start, "end": end, "root": root, "size": len(names), "items": items}
+
+    def verify_range(self, start: int, end: int, proof: object) -> bool:
+        """Verify an ascending index-range proof using the proof alone; no state is read.
+
+        Only a proof isomorphic to one :meth:`prove_range` emits is accepted: a JSON
+        object with exactly ``start``, ``end``, ``root``, ``size`` and ``items``. The
+        arguments ``start``/``end`` must be non-negative JSON integers with
+        ``start < end`` and must match the proof; ``size`` must be at least ``end``;
+        items must number ``end - start``, be strictly ascending by non-empty name
+        with continuous indices ``start``..``end-1``, non-negative integer balances,
+        and sibling paths that each recompute the one root over a tree of ``size``
+        leaves. Any mismatch, type confusion or broken path returns False.
+        """
+        try:
+            if not _is_int(start) or not _is_int(end) or start < 0 or end < 0 or start >= end:
+                return False
+            if not isinstance(proof, dict) or set(proof) != {"start", "end", "root", "size", "items"}:
+                return False
+            if not _is_int(proof["start"]) or proof["start"] != start:
+                return False
+            if not _is_int(proof["end"]) or proof["end"] != end:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < end:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root):
+                return False
+            items = proof["items"]
+            if not isinstance(items, list) or len(items) != end - start:
+                return False
+            previous: str | None = None
+            for position, item in enumerate(items):
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index", "path"}:
+                    return False
+                name = item["account"]
+                if not isinstance(name, str) or not name or (previous is not None and not previous < name):
+                    return False
+                balance = item["balance"]
+                index = item["index"]
+                if not _is_int(balance) or balance < 0:
+                    return False
+                if not _is_int(index) or index != start + position:
+                    return False
+                path = _proof_path(index, size, item["path"])
+                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                    return False
+                previous = name
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
     def prove_absence(self, account: str) -> dict:
         """Absence proof for an account that does not currently exist.
 

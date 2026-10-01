@@ -24,11 +24,14 @@ python3 -m chain_state --root ./state prove-absence alice
 python3 -m chain_state --root ./state verify-absence alice <proof>
 python3 -m chain_state --root ./state prove-prefix 3
 python3 -m chain_state --root ./state verify-prefix 3 <proof>
+python3 -m chain_state --root ./state prove-range 1 3
+python3 -m chain_state --root ./state verify-range 1 3 <proof>
+cat proof.json | python3 -m chain_state --root ./state verify-range 1 3 -
 ```
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -49,6 +52,8 @@ python3 -m chain_state --root ./state verify-prefix 3 <proof>
 - `verify_absence(account, proof) -> bool` 仅凭证明验证账户不存在，不读取状态目录；任何不一致均返回 `False`。
 - `prove_prefix(count) -> dict` 从最小名称起前 `count` 个账户的连续前缀证明；`count` 须为非负 JSON 整数，大于账户数抛 `ValueError`。非空状态的 count 0 无法锚定 root，抛 `ValueError`；空状态的 count 0 以空树根生成空 items。
 - `verify_prefix(count, proof) -> bool` 仅凭证明验证名称升序连续前缀，不读取状态目录；`count` 非法或任何不一致均返回 `False`。
+- `prove_range(start, end) -> dict` 名称升序列表上半开区间 `[start, end)` 的任意索引区间证明；`start`、`end` 须为非负 JSON 整数且满足 `start < end <= 账户数`，否则抛 `ValueError`。证明只含 `start`、`end`、`root`、`size`、`items`，items 恰好覆盖索引 start 到 end-1，每项只含 `account`、`balance`、`index`、`path`。
+- `verify_range(start, end, proof) -> bool` 仅凭证明验证区间，不读取状态目录；参数非法、顶层字段缺失或多余、`size < end`、items 数量/索引/名称/余额/path 不符或哈希重算不一致均返回 `False`。
 
 ### 前缀证明
 
@@ -57,6 +62,14 @@ python3 -m chain_state --root ./state verify-prefix 3 <proof>
 - `items` 按名称严格升序，索引从 0 连续到 count-1，每项只含 `account`、`balance`、`index`、`path`，路径沿用包含证明格式，每项都须重算同一 `root`。
 - 验证方拒绝 `count` 不符、`size < count`、负数或非整数余额、索引断裂、非严格升序及路径错误。
 - 空状态的 count 0：`items` 为空，`root` 必须等于空树状态根。
+
+### 区间证明
+
+证明为可序列化 JSON，只含 `start`、`end`、`root`、`size`、`items`，覆盖名称升序列表上的半开区间 `[start, end)`：
+
+- `items` 数量恰为 `end - start`，索引从 `start` 连续到 `end-1`，名称严格升序；每项只含 `account`、`balance`、`index`、`path`，路径沿用包含证明格式，每项都须重算同一 `root`。
+- 验证方拒绝参数与证明不一致、`size < end`、顶层字段缺失或多余、items 数量不符、索引断裂、非严格升序、负数或非整数余额、路径错误及哈希不一致。
+- 命令行 `start`、`end` 只接受非负 JSON 整数且满足 `start < end <= 当前账户数`，否则以 2 退出；`proof` 可直接传 JSON，传 `-` 时从 stdin 读取。
 
 ### 不存在证明
 
