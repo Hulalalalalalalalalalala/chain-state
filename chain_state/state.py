@@ -146,6 +146,38 @@ class State:
         self._write(document)
         return document["version"]
 
+    def transfer(self, source: str, target: str, amount: int) -> int:
+        """Atomically move ``amount`` from ``source`` to ``target`` and return the new version.
+
+        ``source`` and ``target`` must be distinct non-empty strings and ``amount`` a
+        positive JSON integer (booleans are not integers); anything else raises
+        ``ValueError``. The source account must exist (``KeyError`` otherwise) and hold
+        at least ``amount``, otherwise ``ValueError`` is raised and nothing changes.
+        The target is created with ``amount`` when absent, or credited on top of its
+        current balance. A source drained to zero keeps its account record. Every check
+        runs before the single write, so a rejected transfer changes no account,
+        version or state root.
+        """
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(target, str) or not target:
+            raise ValueError("target must be a non-empty string")
+        if source == target:
+            raise ValueError("source and target must be different accounts")
+        if not _is_int(amount) or amount <= 0:
+            raise ValueError("amount must be a positive integer")
+        document = self._read()
+        accounts = document["accounts"]
+        if source not in accounts:
+            raise KeyError(f"unknown account {source!r}")
+        if int(accounts[source]) < amount:
+            raise ValueError(f"insufficient funds: {source} has {int(accounts[source])}, needs {amount}")
+        accounts[source] = int(accounts[source]) - amount
+        accounts[target] = int(accounts.get(target, 0)) + amount
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
     def apply(self, transaction: dict) -> int:
         """Apply one transaction of batched ``set`` writes and ``delete`` removals.
 

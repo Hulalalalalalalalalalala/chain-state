@@ -26,6 +26,17 @@ def _non_negative_int(text: str) -> int:
     return value
 
 
+def _positive_int(text: str) -> int:
+    """argparse type: exactly a positive JSON integer (booleans rejected)."""
+    try:
+        value = json.loads(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a positive JSON integer, got {text!r}")
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive JSON integer, got {text!r}")
+    return value
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chain_state", description="Account state machine with a verifiable state root")
     parser.add_argument("--root", required=True, help="state directory")
@@ -36,6 +47,10 @@ def _parser() -> argparse.ArgumentParser:
     write.add_argument("balance", type=int)
     delete = sub.add_parser("delete", help="remove an existing account")
     delete.add_argument("account")
+    transfer = sub.add_parser("transfer", help="atomically move funds between two accounts")
+    transfer.add_argument("source")
+    transfer.add_argument("target")
+    transfer.add_argument("amount", type=_positive_int)
     apply = sub.add_parser("apply", help="apply one set/delete transaction from inline JSON")
     apply.add_argument("transaction", help="transaction JSON, or - to read it from stdin")
     read = sub.add_parser("get", help="read an account balance")
@@ -86,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             print(state.set(args.account, args.balance))
         elif args.command == "delete":
             print(state.delete(args.account))
+        elif args.command == "transfer":
+            print(state.transfer(args.source, args.target, args.amount))
         elif args.command == "apply":
             raw = sys.stdin.read() if args.transaction == "-" else args.transaction
             print(state.apply(json.loads(raw)))
