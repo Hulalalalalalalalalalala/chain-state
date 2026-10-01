@@ -20,6 +20,7 @@ python3 -m chain_state --root ./state verify alice 100 <proof>
 python3 -m chain_state --root ./state delete alice
 python3 -m chain_state --root ./state apply '{"set": {"bob": 5}, "delete": ["alice"]}'
 echo '{"set": {"bob": 5}}' | python3 -m chain_state --root ./state apply -
+python3 -m chain_state --root ./state transfer alice bob 10
 python3 -m chain_state --root ./state prove-absence alice
 python3 -m chain_state --root ./state verify-absence alice <proof>
 python3 -m chain_state --root ./state prove-prefix 3
@@ -32,7 +33,7 @@ python3 -m chain_state --root ./state verify-name-range c e <proof>
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -45,6 +46,7 @@ python3 -m chain_state --root ./state verify-name-range c e <proof>
 - `get(account) -> int` 读取余额；账户不存在或已删除返回 0。
 - `delete(account) -> int` 删除存在的账户并返回新版本号；账户不存在抛出 `KeyError`。写入 0 不是删除。
 - `apply(transaction) -> int` 原子提交一笔交易：`set` 对象写入账户新余额、`delete` 数组删除账户，整批只增加一个版本；两字段省略或为空即空批次，返回当前版本且不写入。校验全部先于写入：结构或类型错误抛出 `ValueError`，删除不存在账户抛出 `KeyError`，失败后无可见变化。
+- `transfer(source, target, amount) -> int` 原子转账：`source`、`target` 为不同的非空字符串，`amount` 为正的 JSON 整数（布尔不算整数）；source 已存在且余额充足，target 不存在则创建、已存在则在原余额上增加。成功时源账户减少 amount（变为 0 也保留账户记录），目标账户增加 amount，整次操作只增加一个版本并返回。所有校验与余额检查先于写入：参数或类型错误抛出 `ValueError`，source 不存在抛出 `KeyError`，余额不足抛出 `ValueError`，失败后账户、版本与状态根均不变。
 - `version() -> int` 当前版本号。
 - `state_root() -> str` 当前全部账户的状态根（十六进制）。
 - `prove(account) -> dict` 该账户的包含证明。

@@ -201,6 +201,41 @@ class State:
         self._write(document)
         return document["version"]
 
+    def transfer(self, source: str, target: str, amount: int) -> int:
+        """Atomically move ``amount`` from ``source`` to ``target`` and return the new version.
+
+        ``source`` and ``target`` must be distinct non-empty strings and ``amount`` a
+        positive JSON integer (booleans are not integers). ``source`` must already hold
+        at least ``amount``; an unknown source raises ``KeyError`` and insufficient funds
+        raise ``ValueError``. ``target`` is created with ``amount`` when absent or has it
+        added to its balance; a source drained to zero keeps its account record. Every
+        check runs before anything is written, so a rejected transfer leaves the
+        accounts, version and state root untouched. A successful transfer adds exactly
+        one version.
+        """
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(target, str) or not target:
+            raise ValueError("target must be a non-empty string")
+        if source == target:
+            raise ValueError("source and target must be different accounts")
+        if not _is_int(amount) or amount <= 0:
+            raise ValueError("amount must be a positive integer")
+        document = self._read()
+        accounts = document["accounts"]
+        if source not in accounts:
+            raise KeyError(f"unknown account {source!r}")
+        source_balance = int(accounts[source])
+        if source_balance < amount:
+            raise ValueError(
+                f"insufficient funds: {source!r} has {source_balance}, needs {amount}"
+            )
+        accounts[source] = source_balance - amount
+        accounts[target] = int(accounts.get(target, 0)) + amount
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
     def version(self) -> int:
         """Current version number; 0 for an untouched state."""
         return int(self._read()["version"])
