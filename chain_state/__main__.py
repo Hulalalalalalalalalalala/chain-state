@@ -75,6 +75,8 @@ def _parser() -> argparse.ArgumentParser:
     prove_name_range.add_argument("end")
     prove_many = sub.add_parser("prove-many", help="print a compact inclusion proof for many accounts as JSON")
     prove_many.add_argument("accounts", help="accounts JSON array, or - to read it from stdin")
+    prove_update = sub.add_parser("prove-update", help="preview a balance update and print its read-only proof as JSON")
+    prove_update.add_argument("updates", help="updates JSON object, or - to read it from stdin")
     prove_lookup = sub.add_parser("prove-lookup", help="print a compact existence/absence lookup proof for many accounts as JSON")
     prove_lookup.add_argument("accounts", help="accounts JSON array, or - to read it from stdin")
     prove_page = sub.add_parser("prove-page", help="print a name-paginated proof as JSON")
@@ -102,6 +104,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_many.add_argument("accounts", help="accounts JSON array (inline only)")
     verify_many.add_argument("expected_root")
     verify_many.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_update = sub.add_parser("verify-update", help="verify an update preview proof")
+    verify_update.add_argument("updates", help="updates JSON object (inline only)")
+    verify_update.add_argument("expected_root")
+    verify_update.add_argument("proof", help="proof JSON, or - to read it from stdin")
     verify_lookup = sub.add_parser("verify-lookup", help="verify a compact existence/absence lookup proof for many accounts")
     verify_lookup.add_argument("accounts", help="accounts JSON array (inline only)")
     verify_lookup.add_argument("expected_root")
@@ -154,6 +160,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prove-many":
             raw = sys.stdin.read() if args.accounts == "-" else args.accounts
             print(json.dumps(state.prove_many(json.loads(raw)), sort_keys=True))
+        elif args.command == "prove-update":
+            raw = sys.stdin.read() if args.updates == "-" else args.updates
+            print(json.dumps(state.prove_update(json.loads(raw)), sort_keys=True))
         elif args.command == "prove-lookup":
             raw = sys.stdin.read() if args.accounts == "-" else args.accounts
             print(json.dumps(state.prove_lookup(json.loads(raw)), sort_keys=True))
@@ -188,6 +197,12 @@ def main(argv: list[str] | None = None) -> int:
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             accounts = json.loads(args.accounts)
             ok = state.verify_many(accounts, args.expected_root, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-update":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            updates = json.loads(args.updates)
+            ok = state.verify_update(updates, args.expected_root, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "verify-lookup":

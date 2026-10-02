@@ -32,6 +32,9 @@ python3 -m chain_state --root ./state verify-name-range c e <proof>
 python3 -m chain_state --root ./state prove-many '["alice","bob"]'
 echo '["alice","bob"]' | python3 -m chain_state --root ./state prove-many -
 python3 -m chain_state --root ./state verify-many '["alice","bob"]' <root> <proof>
+python3 -m chain_state --root ./state prove-update '{"alice": 7, "bob": 0}'
+echo '{"alice": 7}' | python3 -m chain_state --root ./state prove-update -
+python3 -m chain_state --root ./state verify-update '{"alice": 7}' <root> <proof>
 python3 -m chain_state --root ./state prove-lookup '["alice","bob","carol"]'
 echo '["alice","bob","carol"]' | python3 -m chain_state --root ./state prove-lookup -
 python3 -m chain_state --root ./state verify-lookup '["alice","bob","carol"]' <root> <proof>
@@ -44,11 +47,13 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
 `prove-many` 的位置参数为内联账户 JSON 数组，值为 `-` 时改从 stdin 读取；`verify-many` 依次接收账户 JSON 数组（仅内联，不支持 `-`）、可信状态根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功以 0 退出，非法输入或未知账户以 2 退出，未 init 以 1 退出；验证成功输出 `valid` 并以 0 退出，失败输出 `invalid` 并以 1 退出，JSON 语法错误或缺少参数以 2 退出。
+
+`prove-update` 的位置参数为内联更新 JSON 对象（账户名到新余额），值为 `-` 时改从 stdin 读取；`verify-update` 依次接收更新 JSON 对象（仅内联，不支持 `-`）、可信旧根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功以 0 退出，非法输入或未知账户以 2 退出，未 init 以 1 退出；验证输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺少参数以 2 退出。
 
 `prove-lookup` 的参数与 stdin 支持对齐 `prove-many`（账户 JSON 数组，`-` 从 stdin 读取），但未知账户是正常结果而非错误；`verify-lookup` 的参数对齐 `verify-many`（账户 JSON 数组仅内联、可信状态根、证明 JSON 支持 `-`）。生成成功以 0 退出，非法输入以 2 退出，未 init 以 1 退出；验证输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺少参数以 2 退出。
 
@@ -78,6 +83,8 @@ python3 -m chain_state --root ./state snapshots
 - `verify_name_range(start, end, proof) -> bool` 仅凭证明验证名称半开区间，不读取状态目录；参数非法、字段缺失或多余、名称或边界错误、items 断裂、路径不能重算 root 等任何不一致均返回 `False`。
 - `prove_many(accounts) -> dict` 任意账户集合的紧凑包含证明；`accounts` 为非空数组，元素是互不重复的非空字符串，允许乱序。结构、类型非法或名称重复抛 `ValueError`，未知账户抛 `KeyError`，合法参数但状态未初始化抛 `FileNotFoundError`。零余额账户也可证明，生成不改变账户、版本或快照。
 - `verify_many(accounts, expected_root, proof) -> bool` 仅凭证明与可信状态根验证，不读取状态目录；参数非法、字段缺失或多余、查询集合与 items 不符、名称或索引未严格递增、节点位置越界、节点重复或冗余、节点不能全部用完或重算根不等于 `proof.root`/可信根等任何不一致均返回 `False`，合法证明返回 `True`。
+- `prove_update(updates) -> dict` 只读预览指定余额替换后的新状态根；`updates` 为非空 JSON 对象，账户名是非空字符串，新余额是非负 JSON 整数（布尔不算整数）。本次只更新已有账户，零余额账户仍算存在。结构与类型校验先于读取状态：非法输入抛 `ValueError`，合法输入但未初始化抛 `FileNotFoundError`，任一账户不存在抛 `KeyError`。生成（无论成功或失败）都不改变账户、版本、快照与持久化内容，也不修改输入对象。
+- `verify_update(updates, expected_root, proof) -> bool` 仅凭更新、可信旧根与证明验证，不读取状态目录；仅当旧根等于可信根、新根对应指定余额替换且其余账户不变时返回 `True`。参数非法、字段缺失或多余、集合不符、类型错误（含布尔冒充整数）、乱序、索引越界、节点缺失/重复/冗余或任一根不符均返回 `False`。更新全部账户时节点为空；全部余额不变时两根相等。
 - `prove_lookup(accounts) -> dict` 一次查询同时证明账户存在或不存在的紧凑证明；`accounts` 为非空数组，元素是互不重复的非空字符串，允许乱序，按名称排序处理。未知账户是正常结果，零余额账户仍算存在；结构、类型非法或名称重复抛 `ValueError`，合法参数但状态未初始化抛 `FileNotFoundError`。生成不改变账户、版本、状态根或快照。
 - `verify_lookup(accounts, expected_root, proof) -> bool` 仅凭证明与可信状态根验证存在/不存在查询，不读取状态目录；参数非法、查询集合与 results 不符、存在结果与同名条目不符、不满足既有不存在证明的名称夹逼及相邻边界规则、无关或缺失条目、违规节点、字段缺失或多余、非法类型与布尔冒充整数均返回 `False`；全部约束满足且重算根同时等于 `proof.root` 与可信根时返回 `True`。
 - `prove_page(start, limit) -> dict` 名称分页证明：返回名称升序中不小于 `start` 的前 `limit` 个账户。`start` 为字符串（允许空串，从首个账户起），`limit` 为正的 JSON 整数（布尔不算整数），否则抛 `ValueError`；合法参数但状态未初始化抛 `FileNotFoundError`。零余额账户仍参与分页；生成不改变账户、版本、状态根或快照。
@@ -130,6 +137,17 @@ python3 -m chain_state --root ./state snapshots
 - `nodes` 恰好包含把 `items` 连接到根所缺的**真实兄弟节点**：能由所选账户或较低层节点重建的节点一律不含，奇数层末节点的复制项不单独给出（验证方按现有树规则自行复制末节点），同一位置只出现一次。选中全部账户时 `nodes` 为空。
 - 验证方不读状态目录：检查查询集合与 `items` 完全一致、名称与索引严格递增、节点位置在 `size` 决定的树形范围内，随后逐层重算，所有节点必须恰好被用完一次，重算出的根同时等于 `proof.root` 与传入的可信根。查询集合不符、字段缺失或多余、重复或冗余节点、越界位置、布尔冒充整数或根不符均判定为 `invalid`。
 - `prove-many` 的账户参数与 `verify-many` 的证明参数都可传 `-` 从 stdin 读取；`verify-many` 的账户数组与可信根只接受内联参数。
+
+### 余额更新预览证明
+
+只读的"旧状态根 → 新状态根"预览证明，为可序列化 JSON，只含 `root`、`new_root`、`size`、`items`、`nodes`：
+
+- `root` 为当前状态根、`new_root` 为仅把指定账户余额替换为新值后的完整状态根（其余账户不变），二者均为 64 个小写十六进制字符；`size` 为账户总数。
+- `items` 恰好含更新集合各账户的**旧余额**，按账户名严格升序，条目格式（每项只含 `account`、`balance`、`index`）、排序与索引规则沿用多账户紧凑包含证明，不附带其他账户的明文余额或独立路径。
+- `nodes` 沿用多账户证明的节点格式、排序与最小节点规则，但为旧树与新树各自所需最小兄弟节点集合的**并集**：同一份节点集必须恰好被两棵树的重算各用完一次。更新全部账户时 `nodes` 为空；全部余额不变时 `root == new_root`。
+- 验证方不读状态目录：检查更新集合与 `items` 完全一致、可信根为 64 个小写十六进制字符且等于 `proof.root`，用 items 中的旧余额与更新后的新余额分别重算，旧树重算根等于 `root`、新树重算根等于 `new_root`，且所有节点在两次重算中都恰好被用完。参数非法、字段缺失或多余、集合不符、类型错误（含布尔冒充整数）、乱序、索引越界、节点缺失、重复或冗余、任一根不符均判定为 `invalid`。
+- 单账户、奇数账户总数及更新全部账户都适用；生成不改变账户、版本、快照与持久化内容。
+- `prove-update` 的更新参数与 `verify-update` 的证明参数都可传 `-` 从 stdin 读取；`verify-update` 的更新对象与可信根只接受内联参数。
 
 ### 存在/不存在混合查询证明
 
