@@ -1084,3 +1084,207 @@ class State:
             return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
+
+    def prove_page(self, start: object, limit: object) -> dict:
+        """Name-paginated inclusion proof for the first ``limit`` accounts at or above ``start``.
+
+        ``start`` must be a string (the empty string is allowed and begins at the first
+        account) and ``limit`` a positive JSON integer (booleans are not integers);
+        invalid arguments raise ``ValueError`` before the state is touched, while valid
+        arguments over an uninitialised state raise ``FileNotFoundError``. The proof
+        carries exactly ``start``, ``limit``, ``root``, ``size``, ``prev``, ``next``,
+        ``items`` and ``nodes``: ``items`` are the page accounts in ascending name order
+        with their full-sorted indices in the compact :meth:`prove_many` item format,
+        ``prev`` is the immediate predecessor of the first qualifying account (null at
+        the head of the order) and ``next`` the immediate successor of the page (null at
+        the tail). ``prev``, ``items`` and ``next`` share one minimal compact
+        multi-proof. An empty state yields the empty-tree root with null boundaries and
+        empty items/nodes; a ``start`` past the last account yields an empty page whose
+        ``prev`` is the tail account. Zero-balance accounts participate like any other.
+        Generation never mutates accounts, versions, the root or snapshots.
+        """
+        if not isinstance(start, str):
+            raise ValueError("start must be a string")
+        if not _is_int(limit) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        document = self._read()
+        accounts = document["accounts"]
+        names = sorted(accounts)
+        size = len(names)
+        root = _root_for(accounts)
+        leaves = [_leaf(n, int(accounts[n])) for n in names]
+
+        def entry(index: int) -> dict:
+            name = names[index]
+            return {"account": name, "balance": int(accounts[name]), "index": index}
+
+        first = bisect.bisect_left(names, start)
+        end = min(first + limit, size)
+        previous = entry(first - 1) if first > 0 else None
+        following = entry(end) if end < size else None
+        page = list(range(first, end))
+        items = [entry(index) for index in page]
+        needed = set(page)
+        if previous is not None:
+            needed.add(previous["index"])
+        if following is not None:
+            needed.add(following["index"])
+        nodes = [{"level": level, "index": index, "hash": hash_value}
+                 for level, index, hash_value in merkle_multiproof(leaves, sorted(needed))]
+        return {"start": start, "limit": limit, "root": root, "size": size,
+                "prev": previous, "next": following, "items": items, "nodes": nodes}
+
+    def verify_page(self, start: object, limit: object, expected_root: object, proof: object) -> bool:
+        """Verify a name-paginated proof using the proof alone; the state directory is never read.
+
+        Only a proof isomorphic to one :meth:`prove_page` emits is accepted: a JSON
+        object with exactly ``start``, ``limit``, ``root``, ``size``, ``prev``, ``next``,
+        ``items`` and ``nodes``, with its own ``start``/``limit`` equal to the arguments
+        and ``root`` equal to ``expected_root`` (64 lowercase hex characters). Items
+        must be strictly ascending accounts at or above ``start`` with continuous
+        full-list indices, non-negative integer balances and no more than ``limit``
+        entries. ``prev`` (null only when the page starts at index 0) must sit one index
+        below the page and name an account below ``start``; ``next`` may appear only on
+        a full page, one index above the last item and named above it, while a short or
+        empty page must carry ``next`` null and reach the tail -- an empty page over a
+        non-empty state is anchored by the tail account as ``prev``. ``prev``/``next``
+        use the same compact entry format as items and share one minimal multi-proof;
+        every node must be consumed exactly once recomputing a root equal to both
+        ``proof.root`` and ``expected_root``. Size 0 is anchored solely by the
+        empty-tree root with null boundaries and empty arrays. Invalid arguments,
+        missing or extra fields, type confusion (booleans posing as integers), missing
+        or out-of-order entries, illegal nodes or any root discrepancy return False.
+        """
+        try:
+            if not isinstance(start, str) or not _is_int(limit) or limit <= 0:
+                return False
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {
+                "start", "limit", "root", "size", "prev", "next", "items", "nodes"
+            }:
+                return False
+            if proof["start"] != start or proof["limit"] != limit:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root) or root != expected_root:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 0:
+                return False
+            previous, following = proof["prev"], proof["next"]
+            raw_items, raw_nodes = proof["items"], proof["nodes"]
+            if not isinstance(raw_items, list) or not isinstance(raw_nodes, list):
+                return False
+            if len(raw_items) > limit:
+                return False
+
+            if size == 0:
+                return (previous is None and following is None and not raw_items
+                        and not raw_nodes and root == merkle_root([]).hex())
+
+            def as_entry(value: object) -> tuple[str, int, int] | None:
+                """Validate one compact ``{account, balance, index}`` entry at an in-range index."""
+                if not isinstance(value, dict) or set(value) != {"account", "balance", "index"}:
+                    return None
+                name, balance, index = value["account"], value["balance"], value["index"]
+                if not isinstance(name, str) or not name:
+                    return None
+                if not _is_int(balance) or balance < 0:
+                    return None
+                if not _is_int(index) or not 0 <= index < size:
+                    return None
+                return name, balance, index
+
+            leaves: dict[int, bytes] = {}
+
+            def add_leaf(index: int, name: str, balance: int) -> bool:
+                if index in leaves:
+                    return False
+                leaves[index] = _leaf(name, balance)
+                return True
+
+            first_index: int | None = None
+            expected_index: int | None = None
+            last_name: str | None = None
+            for item in raw_items:
+                parsed = as_entry(item)
+                if parsed is None:
+                    return False
+                name, balance, index = parsed
+                if not name >= start:
+                    return False
+                if last_name is not None and not last_name < name:
+                    return False
+                if expected_index is None:
+                    first_index, expected_index = index, index
+                elif index != expected_index:
+                    return False
+                if not add_leaf(index, name, balance):
+                    return False
+                expected_index += 1
+                last_name = name
+
+            if raw_items:
+                assert first_index is not None and expected_index is not None
+                last_index = expected_index - 1
+                if previous is None:
+                    if first_index != 0:
+                        return False
+                else:
+                    parsed = as_entry(previous)
+                    if parsed is None:
+                        return False
+                    name, balance, index = parsed
+                    if index != first_index - 1 or not name < start:
+                        return False
+                    if not add_leaf(index, name, balance):
+                        return False
+                if following is None:
+                    if last_index != size - 1:
+                        return False
+                else:
+                    if len(raw_items) != limit:
+                        return False
+                    parsed = as_entry(following)
+                    if parsed is None:
+                        return False
+                    name, balance, index = parsed
+                    if index != last_index + 1 or not last_name < name:
+                        return False
+                    if not add_leaf(index, name, balance):
+                        return False
+            else:
+                # An empty page over a non-empty tree means every account is below start:
+                # the tail account anchors it as prev and there is no successor.
+                if following is not None:
+                    return False
+                parsed = as_entry(previous)
+                if parsed is None:
+                    return False
+                name, balance, index = parsed
+                if index != size - 1 or not name < start:
+                    return False
+                if not add_leaf(index, name, balance):
+                    return False
+
+            nodes: dict[tuple[int, int], bytes] = {}
+            previous_position: tuple[int, int] | None = None
+            for node in raw_nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, index = node["level"], node["index"]
+                if not _is_int(level) or not _is_int(index) or level < 0 or index < 0:
+                    return False
+                position = (level, index)
+                if previous_position is not None and not previous_position < position:
+                    return False
+                if not _is_hex64(node["hash"]):
+                    return False
+                nodes[position] = bytes.fromhex(node["hash"])
+                previous_position = position
+
+            recomputed = merkle_verify_multiproof(leaves, nodes, size)
+            return recomputed is not None and recomputed.hex() == root
+        except (KeyError, TypeError, ValueError):
+            return False

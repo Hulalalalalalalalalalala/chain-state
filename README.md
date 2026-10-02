@@ -35,6 +35,9 @@ python3 -m chain_state --root ./state verify-many '["alice","bob"]' <root> <proo
 python3 -m chain_state --root ./state prove-lookup '["alice","bob","carol"]'
 echo '["alice","bob","carol"]' | python3 -m chain_state --root ./state prove-lookup -
 python3 -m chain_state --root ./state verify-lookup '["alice","bob","carol"]' <root> <proof>
+python3 -m chain_state --root ./state prove-page '' 10
+python3 -m chain_state --root ./state prove-page carol 10
+python3 -m chain_state --root ./state verify-page carol 10 <root> <proof>
 python3 -m chain_state --root ./state snapshot checkpoint
 python3 -m chain_state --root ./state restore checkpoint
 python3 -m chain_state --root ./state snapshots
@@ -42,13 +45,15 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
 `prove-many` 的位置参数为内联账户 JSON 数组，值为 `-` 时改从 stdin 读取；`verify-many` 依次接收账户 JSON 数组（仅内联，不支持 `-`）、可信状态根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功以 0 退出，非法输入或未知账户以 2 退出，未 init 以 1 退出；验证成功输出 `valid` 并以 0 退出，失败输出 `invalid` 并以 1 退出，JSON 语法错误或缺少参数以 2 退出。
 
 `prove-lookup` 的参数与 stdin 支持对齐 `prove-many`（账户 JSON 数组，`-` 从 stdin 读取），但未知账户是正常结果而非错误；`verify-lookup` 的参数对齐 `verify-many`（账户 JSON 数组仅内联、可信状态根、证明 JSON 支持 `-`）。生成成功以 0 退出，非法输入以 2 退出，未 init 以 1 退出；验证输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺少参数以 2 退出。
+
+`prove-page` 的位置参数为起点名称（允许空串）与正整数 `limit`（布尔不算整数）；`verify-page` 依次接收起点名称、`limit`、可信状态根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功输出证明 JSON 并以 0 退出，非法参数以 2 退出，未 init 以 1 退出；验证遇到参数非法、字段缺失或多余、类型错误、漏项、乱序、违规节点或根不符输出 `invalid` 并以 1 退出，成功输出 `valid` 并以 0 退出，JSON 语法错误或缺参数以 2 退出。
 
 ## 公开接口
 
@@ -76,6 +81,8 @@ python3 -m chain_state --root ./state snapshots
 - `verify_many(accounts, expected_root, proof) -> bool` 仅凭证明与可信状态根验证，不读取状态目录；参数非法、字段缺失或多余、查询集合与 items 不符、名称或索引未严格递增、节点位置越界、节点重复或冗余、节点不能全部用完或重算根不等于 `proof.root`/可信根等任何不一致均返回 `False`，合法证明返回 `True`。
 - `prove_lookup(accounts) -> dict` 一次查询同时证明账户存在或不存在的紧凑证明；`accounts` 为非空数组，元素是互不重复的非空字符串，允许乱序，按名称排序处理。未知账户是正常结果，零余额账户仍算存在；结构、类型非法或名称重复抛 `ValueError`，合法参数但状态未初始化抛 `FileNotFoundError`。生成不改变账户、版本、状态根或快照。
 - `verify_lookup(accounts, expected_root, proof) -> bool` 仅凭证明与可信状态根验证存在/不存在查询，不读取状态目录；参数非法、查询集合与 results 不符、存在结果与同名条目不符、不满足既有不存在证明的名称夹逼及相邻边界规则、无关或缺失条目、违规节点、字段缺失或多余、非法类型与布尔冒充整数均返回 `False`；全部约束满足且重算根同时等于 `proof.root` 与可信根时返回 `True`。
+- `prove_page(start, limit) -> dict` 名称分页证明：返回按既有名称顺序排列、名称不小于 `start` 的前 `limit` 个账户；`start` 为字符串且允许空串，`limit` 为正整数（布尔不算整数），非法参数抛 `ValueError`，合法参数但状态未初始化抛 `FileNotFoundError`。证明只含 `start`、`limit`、`root`、`size`、`prev`、`next`、`items`、`nodes`，其中 `root`/`size` 为当前根与账户总数，`items` 为本页账户，`prev` 为首个符合起点账户的立即前驱（越过首部为 `null`），`next` 为本页后的立即后继（越过尾部为 `null`）；条目与边界沿用 `prove_many` 的条目格式和全量索引，共用符合其格式与最小节点规则的一份 `nodes`，不携带独立路径或其他账户。空状态使用既有空树根，边界为 `null`，两数组为空；起点超过尾账户时返回空页且 `prev` 为尾账户；零余额账户仍参与分页。生成不改变账户、版本、根或快照。
+- `verify_page(start, limit, expected_root, proof) -> bool` 仅凭参数、可信根与证明验证分页，不读取状态目录；可信根须为 64 个小写十六进制字符。检查名称关系（条目均不小于 `start`、严格升序，`prev` 名称小于 `start`）、连续全量索引、页长不超过 `limit`、不满页时 `next` 为 `null` 且到达尾部、空页由尾账户作 `prev` 锚定、条目与边界共用的所有节点恰好全部用完，重算根同时等于 `proof.root` 与可信根。参数非法、字段缺失或多余、类型错误（含布尔冒充整数）、漏项、乱序、违规节点或根不符均返回 `False`；空状态只接受空树根与空数组。`next` 非空时其 `account` 即下一页的起点，为 `null` 表示分页结束。
 - `create_snapshot(label) -> int` 在不改变当前账户、版本与状态根的前提下，把当前 accounts 的独立副本连同调用前版本、状态根保存为名为 `label` 的快照，返回调用前版本；`label` 须为非空字符串，同名快照已存在抛 `ValueError`。
 - `restore_snapshot(label) -> int` 用快照 accounts 完整替换当前账户映射，使状态根严格等于快照 root，版本只增加一次并返回新版本；即使内容相同也增加版本，原快照保持不变、可重复恢复。`label` 非法抛 `ValueError`，未知 label 抛 `KeyError`；快照缺字段、类型错误或 root 不能由 accounts 重算时抛 `ValueError`，且任何失败都不改变账户、版本、状态根或快照集合。
 - `list_snapshots() -> dict` 只读返回独立副本，按 label 排序；每个值只含 `accounts`（账户名到非负整数余额）、`version`（创建时版本）与 `root`（64 个小写十六进制字符）。
@@ -135,6 +142,17 @@ python3 -m chain_state --root ./state snapshots
 - 验证方不读状态目录：检查查询集合与 `results` 完全一致且按名升序、存在结果与同名同索引条目一致、不存在结果的边界名称严格夹逼且索引相邻、`items` 不多不少恰好覆盖所需条目、节点规则与多账户证明相同，重算出的根同时等于 `proof.root` 与可信根。查询集合不符、无关或缺失条目、违规节点、字段缺失或多余、布尔冒充整数或根不符均判定为 `invalid`。
 - 空状态使用既有空树根，`size` 为 0，`items` 与 `nodes` 为空，各结果的 `index`、`prev`、`next` 均为 `null`。
 - `prove-lookup` 的账户参数与 `verify-lookup` 的证明参数都可传 `-` 从 stdin 读取；`verify-lookup` 的账户数组与可信根只接受内联参数。
+
+### 名称分页证明
+
+证明为可序列化 JSON，只含 `start`、`limit`、`root`、`size`、`prev`、`next`、`items`、`nodes`：
+
+- `start` 为字符串（允许空串），`limit` 为正整数（布尔不算整数），且与验证调用的参数完全一致；`root` 沿用当前状态根（64 个小写十六进制字符），`size` 为非负整数账户总数。
+- `items` 为名称不小于 `start` 的至多 `limit` 个账户，按名称严格升序，每项只含 `account`、`balance`、`index`，沿用多账户证明的条目格式与全量排序索引，索引连续。
+- `prev` 为首个符合起点账户的立即前驱条目（首页为 `null`），`next` 为本页后立即后继的同名条目（末页为 `null`）；条目与边界共用一份 `nodes`，格式、排序与最小兄弟节点规则与多账户证明一致，不携带独立 `path` 或其他账户。
+- 验证方不读状态目录：检查参数与证明内 `start`/`limit` 一致、条目名称均不小于 `start` 且严格升序、索引连续、页长不超过 `limit`、`prev` 恰好位于首页前一位且名称小于 `start`；`next` 只在满页时允许出现且位于末项后一位、名称更大，不满页时必须为 `null` 且末项到达尾账户；所有节点必须恰好被用完一次，重算出的根同时等于 `proof.root` 与传入的可信根。
+- 空状态使用既有空树根，`size` 为 0，`prev`/`next` 为 `null`，`items` 与 `nodes` 为空；起点超过尾账户时 `items` 为空、`next` 为 `null`，尾账户作为 `prev` 锚定。零余额账户正常参与分页。
+- `next` 非空时其 `account` 即下一页的起点，为 `null` 表示分页结束。`prove-page` 的起点与 `limit` 为内联位置参数（空串传 `''`），`verify-page` 的证明参数可传内联 JSON 或 `-` 从 stdin 读取，可信根只接受内联参数。
 
 ## 约定
 
