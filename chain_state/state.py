@@ -328,6 +328,26 @@ def _source_item_names(proof: object) -> list[str] | None:
     return names
 
 
+def _source_result_names(proof: object) -> list[str] | None:
+    """Pull the result-name list out of a candidate compose-lookup source; None when the shape is off."""
+    if not isinstance(proof, dict) or set(proof) != {
+        "root", "size", "results", "items", "nodes"
+    }:
+        return None
+    raw_results = proof["results"]
+    if not isinstance(raw_results, list):
+        return None
+    names: list[str] = []
+    for result in raw_results:
+        if not isinstance(result, dict):
+            return None
+        name = result.get("account")
+        if not isinstance(name, str) or not name:
+            return None
+        names.append(name)
+    return names
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -1818,6 +1838,212 @@ class State:
             return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
+
+    def compose_lookup(self, accounts: object, trusted_root: object, sources: object) -> dict:
+        """Recompose an existence/absence lookup proof offline from existing lookup proofs.
+
+        ``accounts`` follows the same rules as :meth:`prove_lookup`: a non-empty
+        array of unique non-empty strings in any order. ``trusted_root`` must be 64
+        lowercase hexadecimal characters. ``sources`` must be a non-empty array;
+        every entry must be a proof shaped like one :meth:`prove_lookup` emits that
+        passes :meth:`verify_lookup` under its own result-name set and
+        ``trusted_root``, and all sources must agree on the root and total account
+        count. Sources may overlap or repeat in any order.
+
+        Validation order is: the target names and root format first, then every
+        source, then target coverage. Invalid arguments, an invalid source,
+        mismatched totals, conflicting same-name balances or indices, one index
+        bound to different names, a name/index ordering contradiction, or
+        different hashes at one node position raise ``ValueError``. A target need
+        not appear in any source's ``results``: a same-name entry in the union of
+        the sources' plaintext items proves existence (boundary entries and
+        zero-balance accounts included), while two plaintext entries strictly
+        bracketing the target with adjacent full-list indices prove absence (the
+        boundaries may come from different sources); a name before the index-0
+        entry, after the last-index entry, or in an empty tree is provably absent
+        as well. Hash-only or non-adjacent bracketing does not cover a target;
+        when every source is legal but a target cannot be decided the result is
+        ``KeyError``. The returned proof has the exact shape
+        :meth:`prove_lookup` would emit over the same real state -- one result
+        per target, the de-duplicated union of the needed existence entries and
+        boundaries, and the minimal real siblings connecting them to the root,
+        with the usual ordering and odd-level duplication rule -- so it verifies
+        through :meth:`verify_lookup`. Only the inputs are used: the state
+        directory is neither read nor written and need not exist, and neither
+        the inputs nor any persisted state is mutated.
+        """
+        normalized = _validate_account_set(accounts)
+        if not _is_hex64(trusted_root):
+            raise ValueError("trusted root must be 64 lowercase hexadecimal characters")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("sources must be a non-empty array")
+
+        shared_size: int | None = None
+        # Plaintext account facts merged from the sources' items; these maps
+        # never share structure with the inputs (ints are immutable, dicts and
+        # lists rebuilt on output).
+        balances: dict[str, int] = {}
+        index_of: dict[str, int] = {}
+        name_at: dict[int, str] = {}
+        known: dict[tuple[int, int], str] = {}
+        for position, source in enumerate(sources):
+            names = _source_result_names(source)
+            # verify_lookup never raises on malformed structure, but feeding it a
+            # non-array query would; an unparseable source is simply invalid.
+            if names is None or len(names) != len(set(names)) or not self.verify_lookup(
+                    names, trusted_root, source):
+                raise ValueError(f"source {position} is not a valid lookup proof for the trusted root")
+            size = source["size"]
+            if shared_size is None:
+                shared_size = size
+            elif size != shared_size:
+                raise ValueError(
+                    f"source {position} reports size {size}, expected {shared_size}")
+            for item in source["items"]:
+                name, balance, index = item["account"], item["balance"], item["index"]
+                if name in balances:
+                    if balances[name] != balance or index_of[name] != index:
+                        raise ValueError(
+                            f"conflicting source entries for account {name!r}")
+                else:
+                    if index in name_at:
+                        raise ValueError(
+                            f"index {index} bound to both {name_at[index]!r} and {name!r}")
+                    balances[name] = balance
+                    index_of[name] = index
+                    name_at[index] = name
+            for node in source["nodes"]:
+                key = (node["level"], node["index"])
+                if key in known:
+                    if known[key] != node["hash"]:
+                        raise ValueError(
+                            f"conflicting node hash at level {key[0]} index {key[1]}")
+                else:
+                    known[key] = node["hash"]
+
+        assert shared_size is not None
+        # A global name/index ordering contradiction across sources: the merged
+        # plaintext names sorted by name must carry strictly ascending indices.
+        # Each source is internally consistent, so this can only disagree across
+        # two individually valid sources.
+        ordered_plaintext = sorted(balances)
+        for earlier, later in zip(ordered_plaintext, ordered_plaintext[1:]):
+            if index_of[earlier] >= index_of[later]:
+                raise ValueError(
+                    f"name and index ordering contradiction between {earlier!r} and {later!r}")
+
+        # Every source is individually legal and mutually consistent; only now,
+        # after all validation, decide each target from the plaintext union.
+        # Hash-only neighbour leaves carry no name and never take part.
+        results: list[dict] = []
+        needed: set[int] = set()
+        if shared_size == 0:
+            # An empty tree proves every target absent with no boundaries.
+            for account in sorted(normalized):
+                results.append({"account": account, "index": None,
+                                "prev": None, "next": None})
+            return {"root": trusted_root, "size": 0,
+                    "results": results, "items": [], "nodes": []}
+        item_names = ordered_plaintext
+        undecided: list[str] = []
+        for account in sorted(normalized):
+            if account in balances:
+                # A same-name plaintext item (even one that only ever served as
+                # another query's boundary) anchors existence directly.
+                index = index_of[account]
+                results.append({"account": account, "index": index,
+                                "prev": None, "next": None})
+                needed.add(index)
+                continue
+            slot = bisect.bisect_left(item_names, account)
+            prev_name = item_names[slot - 1] if slot > 0 else None
+            next_name = item_names[slot] if slot < len(item_names) else None
+            prev_index = index_of[prev_name] if prev_name is not None else None
+            next_index = index_of[next_name] if next_name is not None else None
+            adjacent = (
+                (prev_index is None and next_index == 0)
+                or (next_index is None and prev_index == shared_size - 1)
+                or (prev_index is not None and next_index is not None
+                    and next_index == prev_index + 1))
+            if not adjacent:
+                # Hash-only or non-adjacent bracketing, or no bracket at all.
+                undecided.append(account)
+                continue
+            results.append({"account": account, "index": None,
+                            "prev": prev_index, "next": next_index})
+            if prev_index is not None:
+                needed.add(prev_index)
+            if next_index is not None:
+                needed.add(next_index)
+        if undecided:
+            raise KeyError(f"no source determines account {undecided[0]!r}")
+
+        widths = _level_widths(shared_size)
+        # Every real node position learnable from the sources, keyed by
+        # (level, index): proven leaves and supplied siblings alike (a level-0
+        # node is merely a non-item neighbour leaf, never account coverage).
+        values: dict[tuple[int, int], bytes] = {
+            (0, index_of[name]): _leaf(name, balances[name]) for name in balances}
+
+        def observe(position: tuple[int, int], digest: bytes) -> None:
+            """Record a real node hash, rejecting a different hash at one position."""
+            previous = values.get(position)
+            if previous is not None and previous != digest:
+                raise ValueError(
+                    f"conflicting node hash at level {position[0]} index {position[1]}")
+            values[position] = digest
+
+        for (level, index), hash_value in known.items():
+            observe((level, index), bytes.fromhex(hash_value))
+        # Bottom-up closure: a parent is known when both children are known; on an
+        # odd level the last real node is its own duplicated sibling. A parent
+        # supplied by one source and reconstructed from another source's interior
+        # must be the same real subtree hash.
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            for parent in range((width + 1) // 2):
+                left_position, right_position = parent * 2, parent * 2 + 1
+                left_key = (level, left_position)
+                duplicated_tail = width % 2 and left_position == width - 1
+                if left_key not in values:
+                    continue
+                if not duplicated_tail and (level, right_position) not in values:
+                    continue
+                left = values[left_key]
+                right = left if duplicated_tail else values[(level, right_position)]
+                observe((level + 1, parent), node_hash(left, right))
+
+        chosen = sorted(needed)
+        wanted: set[tuple[int, int]] = set()
+        current = set(chosen)
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            next_level: set[int] = set()
+            for position in current:
+                sibling = position ^ 1
+                if sibling in current:
+                    pass  # both children belong to items, reconstructed together
+                elif width % 2 and sibling == width:
+                    pass  # duplicated tail, never a real supplied sibling
+                else:
+                    wanted.add((level, sibling))
+                next_level.add(position // 2)
+            current = next_level
+
+        ordered = sorted(wanted)
+        for position in ordered:
+            if position not in values:
+                # Defensive: coverage plus individually valid proofs always
+                # closes the tree, so this marks mutually inconsistent source
+                # material.
+                raise ValueError(f"sources do not connect account set to the root: missing {position}")
+        items = [{"account": name_at[index], "balance": balances[name_at[index]],
+                  "index": index}
+                 for index in chosen]
+        nodes = [{"level": level, "index": index, "hash": values[(level, index)].hex()}
+                 for level, index in ordered]
+        return {"root": trusted_root, "size": shared_size,
+                "results": results, "items": items, "nodes": nodes}
 
     def prove_page(self, start: str, limit: int) -> dict:
         """Paged inclusion proof for up to ``limit`` accounts at or after ``start``.
