@@ -325,6 +325,70 @@ def _check_boundary(boundary: dict, index: int, relation: str, account: str, roo
     return _check_merkle_path(_leaf(name, balance), index, size, path, root)
 
 
+def _minimal_multiproof(
+    leaves: dict[int, bytes],
+    chosen: set[int],
+    pool: dict[tuple[int, int], bytes],
+    size: int,
+) -> dict[tuple[int, int], bytes]:
+    """The minimal real sibling nodes connecting ``chosen`` leaves to the root.
+
+    Given every account leaf recoverable from the source proofs and the pool of
+    their sibling nodes, derive every higher-level node reconstructable from
+    lower-level material (a source need not have listed it itself), then replay
+    the bottom-up multi-proof computation for ``chosen`` alone and return exactly
+    the sibling positions it consumes -- the same set
+    :func:`merkle_multiproof` emits over the real tree. The duplicated tail of an
+    odd level is consumed from the last real node, never listed.
+    """
+    widths = _level_widths(size)
+    depth = len(widths) - 1
+    known: list[dict[int, bytes]] = [dict(leaves)]
+    for _ in range(depth):
+        known.append({})
+    for (level, index), hash_value in pool.items():
+        known[level][index] = hash_value
+    for level in range(depth):
+        width = widths[level]
+        current, above = known[level], known[level + 1]
+        for pair in range(width // 2):
+            left, right = 2 * pair, 2 * pair + 1
+            if left in current and right in current:
+                above.setdefault(pair, node_hash(current[left], current[right]))
+        if width % 2:
+            last = width - 1
+            if last in current:
+                above.setdefault(width // 2, node_hash(current[last], current[last]))
+
+    target_leaves = {index: leaves[index] for index in chosen}
+    needed: dict[tuple[int, int], bytes] = {}
+    current = dict(target_leaves)
+    for level in range(depth):
+        width = widths[level]
+        parents: dict[int, bytes] = {}
+        for position, value in current.items():
+            sibling = position ^ 1
+            if sibling in current:
+                sibling_hash = current[sibling]
+            elif width % 2 and sibling == width:
+                sibling_hash = current[width - 1]
+            else:
+                # Each chosen leaf was connected to the root by some verified
+                # source, so every genuine sibling position must be known.
+                if sibling not in known[level]:
+                    raise ValueError(f"source material cannot connect index {position} to the root")
+                sibling_hash = known[level][sibling]
+                needed[(level, sibling)] = sibling_hash
+            if position % 2 == 0:
+                parents[position // 2] = node_hash(value, sibling_hash)
+            else:
+                parents[position // 2] = node_hash(sibling_hash, value)
+        current = parents
+    if set(current) != {0}:
+        raise ValueError("source material does not recompute a single root")
+    return needed
+
+
 class State:
     """A single-process account state machine rooted at ``root``."""
 
@@ -1465,6 +1529,127 @@ class State:
             return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
+
+    @staticmethod
+    def compose_many(accounts: object, trusted_root: object, sources: object) -> dict:
+        """Recompose a compact inclusion proof from other proofs, with no state directory.
+
+        Given a non-empty ``accounts`` array (same rules and free ordering as
+        :meth:`prove_many`), a trusted 64-lowercase-hex state root and a non-empty
+        array of existing multi-account proofs, return the same proof dictionary
+        :meth:`prove_many` would emit for ``accounts`` against that state: the
+        targets in clear text plus only the minimal real sibling nodes connecting
+        them to the root, obeying the usual ordering and odd-level duplication
+        rules. Sources may overlap or repeat in any order; neither their order nor
+        the order of the targets changes the result, which -- for one real
+        underlying state -- is equal as JSON content to a direct :meth:`prove_many`
+        proof. Pruning one proof, merging several, zero balances, a single-leaf
+        tree and covering the whole tree all work; covering the whole tree yields
+        empty ``nodes``.
+
+        Nothing is read or written on disk, so the state directory need not
+        exist, and no argument is mutated. The target names and root format are
+        checked first, then every source is validated in array order through
+        :meth:`verify_many` on its own item set (each must carry the trusted root
+        and one common, mutually consistent tree size), and only then is target
+        coverage checked: malformed arguments, an invalid source, mismatching
+        sizes, a same-name balance or index clash, a same-index name clash, or a
+        hash clash at one node position raise ``ValueError``; a target absent
+        from every source's items raises ``KeyError`` -- a hash node never
+        counts as account coverage.
+        """
+        normalized = _validate_account_set(accounts)
+        if not _is_hex64(trusted_root):
+            raise ValueError("trusted root must be 64 lowercase hexadecimal characters")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("sources must be a non-empty array")
+
+        # Phase 1: every source must stand on its own by verifying through the
+        # stateless verify_many path -- its whole item set against the trusted
+        # root. No state directory is ever touched.
+        verifier = State(Path(os.devnull))
+        accepted: list[tuple[int, list[dict], list[dict]]] = []
+        for position, source in enumerate(sources):
+            try:
+                if not isinstance(source, dict) or set(source) != {"root", "size", "items", "nodes"}:
+                    raise ValueError
+                raw_items = source["items"]
+                if not isinstance(raw_items, list) or not raw_items or not all(
+                        isinstance(item, dict) and isinstance(item.get("account"), str)
+                        and item["account"] for item in raw_items):
+                    raise ValueError
+                item_names = [item["account"] for item in raw_items]
+                if not verifier.verify_many(item_names, trusted_root, source):
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                raise ValueError(
+                    f"source {position} is not a valid multi-account proof") from None
+            accepted.append((source["size"], raw_items, source["nodes"]))
+
+        # Phase 2: the individually valid proofs must describe one common tree
+        # consistently: the same size, one name per index, one balance per name
+        # and one hash per node position.
+        size: int | None = None
+        leaves: dict[int, bytes] = {}
+        balances: dict[str, int] = {}
+        index_by_name: dict[str, int] = {}
+        names_by_index: dict[int, str] = {}
+        nodes: dict[tuple[int, int], bytes] = {}
+        for position, (source_size, raw_items, raw_nodes) in enumerate(accepted):
+            if size is None:
+                size = source_size
+            elif source_size != size:
+                raise ValueError(
+                    f"source {position} has size {source_size}, expected {size}")
+            for item in raw_items:
+                name, balance, index = item["account"], item["balance"], item["index"]
+                existing_name = names_by_index.get(index)
+                if existing_name is not None and existing_name != name:
+                    raise ValueError(
+                        f"index {index} maps to both {existing_name!r} and {name!r}")
+                if name in index_by_name and index_by_name[name] != index:
+                    raise ValueError(
+                        f"account {name!r} maps to conflicting indices")
+                if name in balances and balances[name] != balance:
+                    raise ValueError(
+                        f"account {name!r} carries conflicting balances")
+                leaf = _leaf(name, balance)
+                existing_leaf = leaves.get(index)
+                if existing_leaf is not None and existing_leaf != leaf:
+                    raise ValueError(
+                        f"account {name!r} conflicts with the leaf at index {index}")
+                names_by_index[index] = name
+                index_by_name[name] = index
+                balances[name] = balance
+                leaves[index] = leaf
+            for node in raw_nodes:
+                key = (node["level"], node["index"])
+                node_hash = bytes.fromhex(node["hash"])
+                existing = nodes.get(key)
+                if existing is not None and existing != node_hash:
+                    raise ValueError(
+                        f"conflicting node hash at level {key[0]} index {key[1]}")
+                nodes[key] = node_hash
+
+        # Phase 3: only account items provide coverage; a hash node never does.
+        assert size is not None
+        target_set = set(normalized)
+        for name in normalized:
+            if name not in balances:
+                raise KeyError(f"no source proves account {name!r}")
+
+        # Phase 4: derive any higher node the sources reconstruct among
+        # themselves, keep just the minimal sibling set the targets consume, and
+        # emit it in the exact prove_many shape.
+        chosen = sorted(index for index, name in names_by_index.items()
+                        if name in target_set)
+        minimal = _minimal_multiproof(leaves, set(chosen), nodes, size)
+        items = [{"account": names_by_index[index],
+                  "balance": balances[names_by_index[index]],
+                  "index": index} for index in chosen]
+        return {"root": trusted_root, "size": size, "items": items,
+                "nodes": [{"level": level, "index": index, "hash": hash_value.hex()}
+                          for (level, index), hash_value in sorted(minimal.items())]}
 
     def prove_lookup(self, accounts: object) -> dict:
         """Compact existence/absence lookup proof for a non-empty set of accounts.
