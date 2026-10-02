@@ -310,6 +310,24 @@ def _validate_receipt(receipt: object) -> dict:
     return {"version": version, "transfers": transfers, "proof": proof}
 
 
+def _source_item_names(proof: object) -> list[str] | None:
+    """Pull the item-name list out of a candidate compose source; None when the shape is off."""
+    if not isinstance(proof, dict) or set(proof) != {"root", "size", "items", "nodes"}:
+        return None
+    raw_items = proof["items"]
+    if not isinstance(raw_items, list):
+        return None
+    names: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("account")
+        if not isinstance(name, str) or not name:
+            return None
+        names.append(name)
+    return names
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -1465,6 +1483,151 @@ class State:
             return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
+
+    def compose_many(self, accounts: object, trusted_root: object, sources: object) -> dict:
+        """Recompose a compact inclusion proof offline from existing proofs alone.
+
+        ``accounts`` follows the same rules as :meth:`prove_many`: a non-empty array
+        of unique non-empty strings in any order. ``trusted_root`` must be 64
+        lowercase hexadecimal characters. ``sources`` must be a non-empty array;
+        every entry must be a proof shaped like one :meth:`prove_many` emits that
+        passes :meth:`verify_many` under its own item-name set and ``trusted_root``,
+        and all sources must agree on the root and total account count. Sources may
+        overlap or repeat in any order.
+
+        Validation order is: the target names and root format first, then every
+        source, then target coverage. Invalid arguments, an invalid source,
+        mismatched totals, conflicting same-name balances or indices, one index
+        bound to different names, or different hashes at one node position raise
+        ``ValueError``; when every source is legal but a target name appears in no
+        source's items the result is ``KeyError`` (node hashes are not account
+        coverage). The returned proof has the exact shape :meth:`prove_many` would
+        emit over the same real state -- only target items and the minimal real
+        siblings connecting them to the root, with the usual ordering and
+        odd-level duplication rule, empty ``nodes`` when the targets cover the
+        whole tree -- so it verifies through :meth:`verify_many`. Only the inputs
+        are used: the state directory is neither read nor written and need not
+        exist, and neither the inputs nor any persisted state is mutated.
+        """
+        normalized = _validate_account_set(accounts)
+        if not _is_hex64(trusted_root):
+            raise ValueError("trusted root must be 64 lowercase hexadecimal characters")
+        if not isinstance(sources, list) or not sources:
+            raise ValueError("sources must be a non-empty array")
+
+        shared_size: int | None = None
+        # Indexed account facts merged from the sources; these maps never share
+        # structure with the inputs (ints are immutable, dicts rebuilt on output).
+        balances: dict[str, int] = {}
+        index_of: dict[str, int] = {}
+        name_at: dict[int, str] = {}
+        known: dict[tuple[int, int], str] = {}
+        for position, source in enumerate(sources):
+            names = _source_item_names(source)
+            # verify_many never raises on malformed structure, but feeding it a
+            # non-array query would; an unparseable source is simply invalid.
+            if names is None or len(names) != len(set(names)) or not self.verify_many(
+                    names, trusted_root, source):
+                raise ValueError(f"source {position} is not a valid multi-account proof for the trusted root")
+            size = source["size"]
+            if shared_size is None:
+                shared_size = size
+            elif size != shared_size:
+                raise ValueError(
+                    f"source {position} reports size {size}, expected {shared_size}")
+            for item in source["items"]:
+                name, balance, index = item["account"], item["balance"], item["index"]
+                if name in balances:
+                    if balances[name] != balance or index_of[name] != index:
+                        raise ValueError(
+                            f"conflicting source entries for account {name!r}")
+                else:
+                    if index in name_at:
+                        raise ValueError(
+                            f"index {index} bound to both {name_at[index]!r} and {name!r}")
+                    balances[name] = balance
+                    index_of[name] = index
+                    name_at[index] = name
+            for node in source["nodes"]:
+                key = (node["level"], node["index"])
+                if key in known:
+                    if known[key] != node["hash"]:
+                        raise ValueError(
+                            f"conflicting node hash at level {key[0]} index {key[1]}")
+                else:
+                    known[key] = node["hash"]
+
+        assert shared_size is not None
+        targets = set(normalized)
+        missing = targets - balances.keys()
+        if missing:
+            raise KeyError(f"no source proves account {sorted(missing)[0]!r}")
+
+        widths = _level_widths(shared_size)
+        # Every real node position learnable from the sources, keyed by
+        # (level, index): proven leaves and supplied siblings alike (a level-0
+        # node is merely a non-item neighbour leaf, never account coverage).
+        values: dict[tuple[int, int], bytes] = {
+            (0, index_of[name]): _leaf(name, balances[name]) for name in balances}
+
+        def observe(position: tuple[int, int], digest: bytes) -> None:
+            """Record a real node hash, rejecting a different hash at one position."""
+            previous = values.get(position)
+            if previous is not None and previous != digest:
+                raise ValueError(
+                    f"conflicting node hash at level {position[0]} index {position[1]}")
+            values[position] = digest
+
+        for (level, index), hash_value in known.items():
+            observe((level, index), bytes.fromhex(hash_value))
+        # Bottom-up closure: a parent is known when both children are known; on an
+        # odd level the last real node is its own duplicated sibling. A parent
+        # supplied by one source and reconstructed from another source's interior
+        # must be the same real subtree hash.
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            for parent in range((width + 1) // 2):
+                left_position, right_position = parent * 2, parent * 2 + 1
+                left_key = (level, left_position)
+                duplicated_tail = width % 2 and left_position == width - 1
+                if left_key not in values:
+                    continue
+                if not duplicated_tail and (level, right_position) not in values:
+                    continue
+                left = values[left_key]
+                right = left if duplicated_tail else values[(level, right_position)]
+                observe((level + 1, parent), node_hash(left, right))
+
+        chosen = sorted(index_of[name] for name in targets)
+        wanted: set[tuple[int, int]] = set()
+        current = set(chosen)
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            next_level: set[int] = set()
+            for position in current:
+                sibling = position ^ 1
+                if sibling in current:
+                    pass  # both children belong to targets, reconstructed together
+                elif width % 2 and sibling == width:
+                    pass  # duplicated tail, never a real supplied sibling
+                else:
+                    wanted.add((level, sibling))
+                next_level.add(position // 2)
+            current = next_level
+
+        ordered = sorted(wanted)
+        for position in ordered:
+            if position not in values:
+                # Defensive: coverage plus individually valid proofs always closes
+                # the tree, so this marks mutually inconsistent source material.
+                raise ValueError(f"sources do not connect account set to the root: missing {position}")
+        items = [{"account": name_at[index], "balance": balances[name_at[index]],
+                  "index": index}
+                 for index in chosen]
+        nodes = [{"level": level, "index": index, "hash": values[(level, index)].hex()}
+                 for level, index in ordered]
+        return {"root": trusted_root, "size": shared_size,
+                "items": items, "nodes": nodes}
 
     def prove_lookup(self, accounts: object) -> dict:
         """Compact existence/absence lookup proof for a non-empty set of accounts.
