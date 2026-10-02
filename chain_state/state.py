@@ -100,12 +100,24 @@ def _proof_path(index: int, size: int, path: object) -> list[dict] | None:
     return steps
 
 
-def _recompute_root(leaf: bytes, index: int, path: list[dict], root: str) -> bool:
-    """Recompute the root from the leaf and a validated sibling path."""
+def _recompute_root(leaf: bytes, index: int, size: int, path: list[dict], root: str) -> bool:
+    """Recompute the root from the leaf and a validated sibling path.
+
+    The tree duplicates the last node of an odd-width level, so whenever the
+    path sits on the last real node of such a level its sibling must be that
+    node itself: the step hash must equal the current hash, at the leaf level
+    and at every higher level.
+    """
     current = leaf
+    position = index
+    width = size
     for step in path:
         sibling = bytes.fromhex(step["hash"])
+        if width % 2 and position == width - 1 and sibling != current:
+            return False
         current = node_hash(current, sibling) if step["side"] == "right" else node_hash(sibling, current)
+        position //= 2
+        width = (width + 1) // 2
     return current.hex() == root
 
 
@@ -190,7 +202,7 @@ def _check_boundary(boundary: dict, index: int, relation: str, account: str, roo
     path = _proof_path(index, size, boundary["path"])
     if path is None:
         return False
-    return _recompute_root(_leaf(name, balance), index, path, root)
+    return _recompute_root(_leaf(name, balance), index, size, path, root)
 
 
 class State:
@@ -647,7 +659,7 @@ class State:
             path = _proof_path(index, size, proof["path"])
             if path is None:
                 return False
-            return _recompute_root(_leaf(account, balance), index, path, root)
+            return _recompute_root(_leaf(account, balance), index, size, path, root)
         except (KeyError, TypeError, ValueError):
             return False
 
@@ -723,7 +735,7 @@ class State:
                 if not _is_int(index) or index != position:
                     return False
                 path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if path is None or not _recompute_root(_leaf(name, balance), index, size, path, root):
                     return False
                 previous = name
             return True
@@ -798,7 +810,7 @@ class State:
                 if not _is_int(item["index"]) or item["index"] != index:
                     return False
                 path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if path is None or not _recompute_root(_leaf(name, balance), index, size, path, root):
                     return False
                 previous = name
             return True
@@ -899,7 +911,7 @@ class State:
                 if not 0 <= index < size:
                     return None
                 path = _proof_path(index, size, boundary["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if path is None or not _recompute_root(_leaf(name, balance), index, size, path, root):
                     return None
                 return index
 
@@ -933,7 +945,7 @@ class State:
                 if item["index"] != index:
                     return False
                 path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if path is None or not _recompute_root(_leaf(name, balance), index, size, path, root):
                     return False
                 last_name = name
             return True
