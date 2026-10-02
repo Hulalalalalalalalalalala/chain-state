@@ -147,6 +147,15 @@ def _parser() -> argparse.ArgumentParser:
     verify_transfers.add_argument("transfers", help="transfers JSON array (inline only)")
     verify_transfers.add_argument("expected_root")
     verify_transfers.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    advance_many = sub.add_parser(
+        "advance-many",
+        help="offline-advance a compact inclusion proof across a transfer batch")
+    advance_many.add_argument("accounts", help="target accounts JSON array (inline only)")
+    advance_many.add_argument("trusted_old_root", help="trusted old state root (64 lowercase hexadecimal characters)")
+    advance_many.add_argument("trusted_new_root", help="trusted new state root (64 lowercase hexadecimal characters)")
+    advance_many.add_argument("old_proof", help="old inclusion proof JSON (inline only)")
+    advance_many.add_argument("transfers", help="transfers JSON batch (inline only)")
+    advance_many.add_argument("transfer_proof", help="transfer preview proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -275,6 +284,15 @@ def main(argv: list[str] | None = None) -> int:
             ok = state.verify_transfers(transfers, args.expected_root, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
+        elif args.command == "advance-many":
+            raw = sys.stdin.read() if args.transfer_proof == "-" else args.transfer_proof
+            accounts = json.loads(args.accounts)
+            old_proof = json.loads(args.old_proof)
+            transfers = json.loads(args.transfers)
+            proof = state.advance_many(
+                accounts, args.trusted_old_root, args.trusted_new_root,
+                old_proof, transfers, json.loads(raw))
+            print(json.dumps(proof, sort_keys=True))
         elif args.command == "report":
             print(json.dumps({"domain": DOMAIN, "version": __version__, "sourceCategories": list(SOURCE_CATEGORIES),
                               "tags": _tags(), "components": ["state", "merkle"],

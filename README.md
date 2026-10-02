@@ -29,6 +29,8 @@ python3 -m chain_state --root ./state transfer-receipt req-1
 python3 -m chain_state --root ./state prove-transfers '[{"source":"alice","target":"bob","amount":10}]'
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state prove-transfers -
 python3 -m chain_state --root ./state verify-transfers '[{"source":"alice","target":"bob","amount":10}]' <root> <proof>
+python3 -m chain_state --root ./state advance-many '["dave"]' <old-root> <new-root> <old-proof> '[{"source":"alice","target":"bob","amount":10}]' <transfer-proof>
+echo '<transfer-proof>' | python3 -m chain_state --root ./state advance-many '["dave"]' <old-root> <new-root> <old-proof> '[{"source":"alice","target":"bob","amount":10}]' -
 python3 -m chain_state --root ./state prove-absence alice
 python3 -m chain_state --root ./state verify-absence alice <proof>
 python3 -m chain_state --root ./state prove-prefix 3
@@ -59,7 +61,7 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`compose-many <accounts> <trusted-root> <sources>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`compose-lookup <accounts> <trusted-root> <sources>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`compose-many <accounts> <trusted-root> <sources>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`compose-lookup <accounts> <trusted-root> <sources>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`advance-many <accounts> <trusted-old-root> <trusted-new-root> <old-proof> <transfers> <transfer-proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -76,6 +78,8 @@ python3 -m chain_state --root ./state snapshots
 `prove-update` 的位置参数为内联更新 JSON 对象（账户名到新余额），值为 `-` 时改从 stdin 读取；`verify-update` 依次接收仅内联的更新 JSON 对象、可信旧根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功输出证明并以 0 退出，非法输入或未知账户以 2 退出，未 init 以 1 退出；验证输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺参数以 2 退出。生成与验证都不改变账户、版本、快照与持久化内容。
 
 `transfer-many` 的位置参数为内联转账批次 JSON 数组，值为 `-` 时改从 stdin 读取；`prove-transfers` 的参数与 stdin 支持与之相同。批次为非空数组，每项对象恰含 `source`、`target`、`amount`：前两者为不同的非空字符串，金额为正的 JSON 整数（布尔不算整数），允许重复转账与重复账户。提交成功只输出版本号，预览成功输出证明 JSON，均以 0 退出；结构非法或余额不足以 2 退出，未知端点以 2 退出，未 init 以 1 退出，失败时 stdout 为空、诊断写 stderr。`verify-transfers` 依次接收仅内联的批次 JSON 数组、可信旧根（64 个小写十六进制字符）与证明 JSON（证明参数支持 `-` 读 stdin），输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺参数以 2 退出并写 stderr。预览与验证都不改变账户、版本、快照与持久化内容。
+
+`advance-many` 离线推进：依次接收仅内联的目标账户 JSON 数组（名称规则同 `prove-many`，允许乱序）、可信旧根与可信新根（均为 64 个小写十六进制字符）、旧多账户包含证明 JSON（仅内联）、转账批次 JSON（规则同 `transfer-many`，仅内联）与转账预览证明 JSON（最后一个参数支持 `-` 从 stdin 读取）。重组只使用输入，不读取也不创建状态目录，即使 `--root` 不存在或其内容损坏亦然。旧包含证明须能按目标集合与可信旧根通过 `verify-many`，转账证明须能按批次与可信旧根通过 `verify-transfers` 且其 `new_root` 等于可信新根，两份证明的账户总数相同；旧树信息中同名余额或索引、同索引名称、名称与索引排序以及同位置哈希不得矛盾。成功只输出推进后的证明 JSON 并以 0 退出；非法参数、余额不足、任一证明无效、根或总数不符或上述矛盾、JSON 语法错误或缺参统一以 2 退出（`ValueError`），stdout 为空、诊断写 stderr。
 
 `transfer-many-once` 依次接收非空请求标识、旧根（64 个小写十六进制字符）与批次 JSON（`-` 从 stdin 读取，批次规则同 `transfer-many`）。首次提交要求当前根等于旧根，随后检查全部端点再按序结算；成功只增加一次版本并只输出版本号（即使最终余额不变也增加），以 0 退出。相同标识、旧根与批次再次提交时直接返回首次成功版本，不结算、不写入，即使期间账户改变或恢复快照也是如此；批次比较保留数组顺序与重复项、忽略对象键顺序。同一标识对应其他旧根或批次、新标识遇当前根不符均属冲突，以 1 退出；未 init 或写入失败也以 1 退出；非法参数、非法根格式、JSON 语法错误、未知端点或余额不足以 2 退出。失败时 stdout 为空、诊断写 stderr，且账户、根、版本、快照与成功记录均不变。
 
@@ -120,6 +124,7 @@ python3 -m chain_state --root ./state snapshots
 - `verify_update(updates, expected_root, proof) -> bool` 仅凭更新对象、可信旧根与证明验证，不读取状态目录；仅当旧根等于可信根、新根对应指定余额替换且其余账户不变时返回 `True`。参数非法、字段缺失或多余、集合不符、类型错误（含布尔冒充整数）、乱序、索引越界、节点缺失重复或冗余、任一根不符均返回 `False`。
 - `prove_transfers(transfers) -> dict` 只读的批量转账预览证明：批次规则同 `transfer_many`，结构与类型校验先于读取状态（非法输入抛 `ValueError`，合法但未初始化抛 `FileNotFoundError`），未知端点抛 `KeyError`，按序结算时余额不足抛 `ValueError`。证明只含 `root`、`new_root`、`size`、`items`、`nodes`：`root` 为当前根，`new_root` 为整批按序结算后的完整状态根，`items` 恰好覆盖端点去重集合、保存**旧**余额（条目格式、排序、索引与节点最小规则沿用多账户证明），不附带无关账户或独立路径；端点覆盖全部账户时 `nodes` 为空，最终余额全部不变时两根相等。生成不改变账户、版本、快照与持久化内容，也不修改输入。
 - `verify_transfers(transfers, expected_root, proof) -> bool` 仅凭批次、可信旧根与证明验证，不读取状态目录；`expected_root` 须为 64 个小写十六进制字符。仅当参与集合与 items 一致、按序逐笔余额充足、旧余额叶子重算的根同时等于 `proof.root` 与可信根、且新根对应整批结算结果（其余账户不变）时返回 `True`，两次重算都必须把所有节点恰好用完一次。参数非法、字段缺失或多余、集合不符、类型错误（含布尔冒充整数）、乱序、索引越界、余额不足、节点缺失、重复或冗余、任一根不符均返回 `False`。
+- `advance_many(accounts, trusted_old_root, trusted_new_root, old_proof, transfers, transfer_proof) -> dict` 仅凭旧多账户包含证明与转账预览证明，把目标账户集合的包含证明从可信旧根离线推进到可信新根，不读取也不创建状态目录，即使目录不存在或内容损坏亦然。`accounts` 沿用 `prove_many` 的名称规则（非空、互不重复的非空字符串，允许乱序），两个可信根均为 64 个小写十六进制字符，`transfers` 沿用 `transfer_many` 的批次规则与按序结算语义。校验严格按序：先校验目标名称、两根格式与批次，再要求旧包含证明以目标名称集合、可信旧根通过 `verify_many`，转账证明以批次、可信旧根通过 `verify_transfers` 且其 `new_root` 等于可信新根，两份证明账户总数相同；随后检查合并的旧树事实——同名余额或索引冲突、同一索引对应不同名称、名称与索引全局排序矛盾、同位置节点哈希冲突。非法参数、余额不足、任一证明无效、根或总数不符或上述矛盾统一抛 `ValueError`，不返回部分结果。输出与同一旧状态提交该批次后直接 `prove_many(accounts)` 的结果按 JSON 内容相等：目标端点携带结算后余额、其余目标余额不变，`nodes` 为新树下连接目标集合到根的最小真实兄弟节点（变化完全发生在查询范围外时所需兄弟节点同样更新为新哈希），沿用既有排序、奇数层末节点复制规则与最小规则，目标覆盖全部账户时 `nodes` 为空；账户数与全量索引不变，转空账户保留，零余额与整批最终余额不变（新旧根相等）均支持，结果可交给可信新根下的 `verify_many` 验证。输出与输入深层独立，调用不修改任何输入，也不触碰账户、版本、快照、成功记录或回执。
 - `create_snapshot(label) -> int` 在不改变当前账户、版本与状态根的前提下，把当前 accounts 的独立副本连同调用前版本、状态根保存为名为 `label` 的快照，返回调用前版本；`label` 须为非空字符串，同名快照已存在抛 `ValueError`。
 - `restore_snapshot(label) -> int` 用快照 accounts 完整替换当前账户映射，使状态根严格等于快照 root，版本只增加一次并返回新版本；即使内容相同也增加版本，原快照保持不变、可重复恢复。`label` 非法抛 `ValueError`，未知 label 抛 `KeyError`；快照缺字段、类型错误或 root 不能由 accounts 重算时抛 `ValueError`，且任何失败都不改变账户、版本、状态根或快照集合。
 - `list_snapshots() -> dict` 只读返回独立副本，按 label 排序；每个值只含 `accounts`（账户名到非负整数余额）、`version`（创建时版本）与 `root`（64 个小写十六进制字符）。
@@ -235,6 +240,17 @@ python3 -m chain_state --root ./state snapshots
 - `nodes` 沿用多账户证明的节点格式、排序与最小兄弟节点规则，新旧两棵树共用同一份节点：每个所需兄弟子树都不含端点账户，故其哈希在两树间不变，验证方据此分别重算两根。端点覆盖全部账户时 `nodes` 为空；最终余额全部等于旧余额时 `new_root == root`。
 - 验证方不读状态目录：先校验批次为非空数组、每项恰含 `source`/`target`/`amount`（不同的非空名称、正整数且拒绝布尔），端点去重集合与 `items` 完全一致、名称与索引严格递增、节点规则与多账户证明相同；再按旧余额逐笔模拟，任一笔余额不足即失败；随后用旧余额叶子重算 `root`（须同时等于 `proof.root` 与可信根），用结算后叶子重算 `new_root`，两次重算都必须把所有节点恰好用完一次。批次非法、字段缺失或多余、集合不符、类型错误（含布尔冒充整数）、乱序、索引越界、余额不足、节点缺失、重复或冗余、任一根不符均判定为 `invalid`。
 - `prove-transfers` 的批次与 `verify-transfers` 的证明参数都可传 `-` 从 stdin 读取；`verify-transfers` 的批次与可信根只接受内联参数。预览不写入：账户、版本、快照与持久化内容均不变，三个入口都不修改输入。
+
+### 包含证明的离线推进（advance-many）
+
+凭旧包含证明与转账预览证明，在不持有状态目录的情况下把一组目标账户的多账户包含证明从可信旧根推进到可信新根；对应方法为 `advance_many(accounts, trusted_old_root, trusted_new_root, old_proof, transfers, transfer_proof)`，子命令为 `advance-many`。
+
+- 目标数组规则同 `prove-many`（非空、互不重复的非空字符串，允许乱序），两个可信根均为 64 个小写十六进制字符，批次规则与按序结算语义同 `transfer-many`。
+- 校验严格按序：先校验目标名称、两根格式与批次，再要求旧包含证明以目标名称集合与可信旧根通过 `verify_many`、转账证明以批次与可信旧根通过 `verify_transfers`（含逐笔余额充足）且其 `new_root` 等于可信新根，并要求两份证明账户总数相同；最后检查两份证明合并的旧树事实无矛盾：同名余额或索引冲突、同一索引对应不同名称、名称与索引全局排序矛盾、同位置节点哈希冲突均为 `ValueError`。非法参数、余额不足、任一证明无效、根或总数不符或上述矛盾统一抛 `ValueError`，不返回部分结果。
+- 推进先以两份证明的明文叶子与兄弟节点自底向上闭包旧树（奇数层末节点按复制规则复现），核对闭包根等于可信旧根；再按序结算端点账户、替换端点叶子并重新闭包得到新树，核对新根等于可信新根；最后按与 `merkle_multiproof` 相同的最小真实兄弟位置规则，从新树取目标集合所需的兄弟节点。因此即使变化完全发生在查询范围外，所需兄弟节点也更新为新哈希；目标与端点部分重合或完全不重合均可。
+- 输出与同一旧状态提交该批次后直接 `prove_many` 按 JSON 内容相等，格式、排序与最小规则完全一致，目标覆盖全部账户时 `nodes` 为空，可交给可信新根下的 `verify-many` 验证。账户数与全量索引不变，转空账户保留；零余额、奇数层末节点复制、整批最终余额不变（新旧根相等）均支持。
+- 只使用输入，即使 `--root` 不存在或目录内容损坏也不读取或创建任何文件；输出与输入深层独立，不修改任何输入、账户、版本、快照、成功记录或回执。
+- `advance-many` 依次接收目标账户 JSON 数组、可信旧根、可信新根、旧包含证明 JSON、批次 JSON（均仅内联）与转账预览证明 JSON（最后一个参数支持 `-` 从 stdin 读取）。成功只输出证明 JSON 并以 0 退出；任何校验失败、JSON 语法错误或缺参均以 2 退出，stdout 为空，诊断写 stderr。
 
 ## 约定
 

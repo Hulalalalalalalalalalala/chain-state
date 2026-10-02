@@ -867,6 +867,214 @@ class State:
         except (KeyError, TypeError, ValueError):
             return False
 
+    def advance_many(self, accounts: object, trusted_old_root: object,
+                     trusted_new_root: object, old_proof: object,
+                     batch: object, transfer_proof: object) -> dict:
+        """Advance a compact inclusion proof across a transfer batch, offline.
+
+        Given the *old* inclusion proof for ``accounts`` (one shaped like
+        :meth:`prove_many` emits) and a transfer preview proof for ``batch``
+        (one shaped like :meth:`prove_transfers` emits), return the inclusion
+        proof the same targets carry under the new state root -- without
+        reading or creating any state directory, even when ``--root`` names a
+        missing or corrupt directory.
+
+        ``accounts`` follows the same rules as :meth:`prove_many`: a non-empty
+        array of unique non-empty strings in any order. Both trusted roots must
+        be 64 lowercase hexadecimal characters and ``batch`` follows the same
+        rules as :meth:`transfer_many` (in-order settlement, a source drained
+        to zero kept). Validation order is: arguments first, then the old
+        inclusion proof must pass :meth:`verify_many` for the target set under
+        the trusted old root, then the transfer proof must pass
+        :meth:`verify_transfers` for the batch under the trusted old root, its
+        ``new_root`` must equal the trusted new root, and the two proofs must
+        report the same total account count. The merged old-tree facts must
+        not contradict one another: same-name balances or indices, one index
+        bound to different names, the global name/index ordering or the hash
+        at one node position. Illegal arguments, insufficient balances, an
+        invalid proof of either kind, a root or total mismatch, or any of the
+        contradictions above raise ``ValueError`` and no partial result is
+        returned.
+
+        The returned proof has the exact shape :meth:`prove_many` would emit
+        for the targets right after settling the batch from the same old
+        state -- new balances for endpoint targets, unchanged balances
+        elsewhere, the minimal real siblings of the new tree (including
+        siblings whose subtree changed entirely outside the target set), the
+        usual ordering and odd-level duplication rule, empty ``nodes`` when
+        the targets cover every account -- so it compares equal as JSON to
+        that directly generated proof and passes :meth:`verify_many` under the
+        trusted new root. Account count and indices never change; zero
+        balances and equal old/new roots are supported. The result is deep
+        independent of every input and no input is mutated.
+        """
+        normalized = _validate_account_set(accounts)
+        if not _is_hex64(trusted_old_root):
+            raise ValueError("trusted old root must be 64 lowercase hexadecimal characters")
+        if not _is_hex64(trusted_new_root):
+            raise ValueError("trusted new root must be 64 lowercase hexadecimal characters")
+        normalized_batch = _validate_transfers(batch)
+        if not self.verify_many(normalized, trusted_old_root, old_proof):
+            raise ValueError(
+                "old inclusion proof is not valid for the target accounts and trusted old root")
+        if not self.verify_transfers(normalized_batch, trusted_old_root, transfer_proof):
+            raise ValueError(
+                "transfer preview proof is not valid for the batch and trusted old root")
+        if transfer_proof["new_root"] != trusted_new_root:
+            raise ValueError("transfer proof new root does not match the trusted new root")
+        size = old_proof["size"]
+        if transfer_proof["size"] != size:
+            raise ValueError("the two proofs report different total account counts")
+
+        # Old-tree plaintext facts merged from both proofs; these maps never
+        # share structure with the inputs.
+        balances: dict[str, int] = {}
+        index_of: dict[str, int] = {}
+        name_at: dict[int, str] = {}
+        known: dict[tuple[int, int], str] = {}
+        for label, proof in (("old inclusion proof", old_proof),
+                             ("transfer preview proof", transfer_proof)):
+            for item in proof["items"]:
+                name, balance, index = item["account"], item["balance"], item["index"]
+                if name in balances:
+                    if balances[name] != balance or index_of[name] != index:
+                        raise ValueError(
+                            f"conflicting {label} entries for account {name!r}")
+                elif index in name_at:
+                    raise ValueError(
+                        f"index {index} bound to both {name_at[index]!r} and {name!r}")
+                else:
+                    balances[name] = balance
+                    index_of[name] = index
+                    name_at[index] = name
+            for node in proof["nodes"]:
+                key = (node["level"], node["index"])
+                if key in known:
+                    if known[key] != node["hash"]:
+                        raise ValueError(
+                            f"conflicting node hash at level {key[0]} index {key[1]}")
+                else:
+                    known[key] = node["hash"]
+
+        # Global name/index ordering: names merged from both proofs must sort
+        # in the same order as their full-list indices. Each proof is
+        # internally consistent, so this can only disagree across the two.
+        ordered_names = sorted(balances)
+        for earlier, later in zip(ordered_names, ordered_names[1:]):
+            if index_of[earlier] >= index_of[later]:
+                raise ValueError(
+                    f"name and index ordering contradiction between {earlier!r} and {later!r}")
+
+        widths = _level_widths(size)
+        # Every real node position learnable from the two proofs, keyed by
+        # (level, index): plaintext leaves and supplied siblings alike.
+        values: dict[tuple[int, int], bytes] = {
+            (0, index_of[name]): _leaf(name, balances[name]) for name in balances}
+
+        def observe(position: tuple[int, int], digest: bytes) -> None:
+            """Record a real old-tree node hash, rejecting a different hash at one position."""
+            previous = values.get(position)
+            if previous is not None and previous != digest:
+                raise ValueError(
+                    f"conflicting node hash at level {position[0]} index {position[1]}")
+            values[position] = digest
+
+        for (level, index), hash_value in known.items():
+            observe((level, index), bytes.fromhex(hash_value))
+        # Bottom-up closure over the old tree, reproducing the duplicated tail
+        # of an odd level from its last real node. A supplied interior node
+        # must equal the hash reconstructed from lower material.
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            for parent in range((width + 1) // 2):
+                left_position, right_position = parent * 2, parent * 2 + 1
+                left_key = (level, left_position)
+                duplicated_tail = width % 2 and left_position == width - 1
+                if left_key not in values:
+                    continue
+                if not duplicated_tail and (level, right_position) not in values:
+                    continue
+                left = values[left_key]
+                right = left if duplicated_tail else values[(level, right_position)]
+                observe((level + 1, parent), node_hash(left, right))
+
+        root_position = (len(widths) - 1, 0)
+        if values.get(root_position) != bytes.fromhex(trusted_old_root):
+            raise ValueError("the merged old-tree material does not recompute the trusted old root")
+
+        # Settle the batch in order on the endpoint accounts' *old* balances.
+        # verify_transfers already checked every per-transfer debit, so this
+        # only re-derives the final balances; a shortfall is still rejected.
+        final_balances = {item["account"]: item["balance"]
+                          for item in transfer_proof["items"]}
+        for transfer in normalized_batch:
+            source, target, amount = (transfer["source"], transfer["target"],
+                                      transfer["amount"])
+            if final_balances[source] < amount:
+                raise ValueError(
+                    f"insufficient funds: {source!r} has {final_balances[source]}, needs {amount}")
+            final_balances[source] -= amount
+            final_balances[target] += amount
+
+        # New tree: replace endpoint leaves, then re-close bottom up. Unchanged
+        # sibling subtrees keep their old hashes; subtrees holding an endpoint
+        # are overwritten by recomputation, so a change outside the target set
+        # still updates every sibling a target needs.
+        new_values = dict(values)
+        for item in transfer_proof["items"]:
+            name, index = item["account"], item["index"]
+            new_values[(0, index)] = _leaf(name, final_balances[name])
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            for parent in range((width + 1) // 2):
+                left_position, right_position = parent * 2, parent * 2 + 1
+                left_key = (level, left_position)
+                duplicated_tail = width % 2 and left_position == width - 1
+                if left_key not in new_values:
+                    continue
+                if not duplicated_tail and (level, right_position) not in new_values:
+                    continue
+                left = new_values[left_key]
+                right = left if duplicated_tail else new_values[(level, right_position)]
+                new_values[(level + 1, parent)] = node_hash(left, right)
+        if new_values.get(root_position) != bytes.fromhex(trusted_new_root):
+            raise ValueError("the merged material does not recompute the trusted new root")
+
+        # Minimal real sibling positions connecting the targets to the new
+        # root, by the same rule merkle_multiproof uses for prove_many.
+        chosen = sorted(index_of[name] for name in normalized)
+        wanted: set[tuple[int, int]] = set()
+        current = set(chosen)
+        for level in range(len(widths) - 1):
+            width = widths[level]
+            next_level: set[int] = set()
+            for position in current:
+                sibling = position ^ 1
+                if sibling in current:
+                    pass  # both children belong to targets, reconstructed together
+                elif width % 2 and sibling == width:
+                    pass  # duplicated tail, never a real supplied sibling
+                else:
+                    wanted.add((level, sibling))
+                next_level.add(position // 2)
+            current = next_level
+
+        ordered = sorted(wanted)
+        for position in ordered:
+            if position not in new_values:
+                # Defensive: two individually valid proofs always close the
+                # tree, so this marks mutually inconsistent material.
+                raise ValueError(
+                    f"proofs do not connect account set to the new root: missing {position}")
+        items = [{"account": name_at[index],
+                  "balance": final_balances.get(name_at[index], balances[name_at[index]]),
+                  "index": index}
+                 for index in chosen]
+        nodes = [{"level": level, "index": index, "hash": new_values[(level, index)].hex()}
+                 for level, index in ordered]
+        return {"root": trusted_new_root, "size": size,
+                "items": items, "nodes": nodes}
+
     def transfer_receipt(self, request_id: object) -> dict | None:
         """Return the historical settlement receipt for a once-request, or None.
 
