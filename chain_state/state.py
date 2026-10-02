@@ -100,12 +100,38 @@ def _proof_path(index: int, size: int, path: object) -> list[dict] | None:
     return steps
 
 
-def _recompute_root(leaf: bytes, index: int, path: list[dict], root: str) -> bool:
-    """Recompute the root from the leaf and a validated sibling path."""
+def _level_widths(size: int) -> list[int]:
+    """Width of every level (leaf level first) in the duplicated-last-node tree."""
+    widths = [size]
+    while widths[-1] > 1:
+        widths.append((widths[-1] + 1) // 2)
+    return widths
+
+
+def _check_merkle_path(leaf: bytes, index: int, size: int, path: object, root: str) -> bool:
+    """Validate a sibling path and recompute the root for the tree ``size`` implies.
+
+    Beyond the shape checks of :func:`_proof_path`, every step that lands on the
+    last real node of an odd-width level must carry a sibling equal to the current
+    node itself: that node is duplicated to even out the level, so nothing else
+    may appear on the right. This holds at the leaf level and every higher level,
+    however many times one path meets a duplicated tail. Any violation of the
+    rule -- a foreign hash at a duplicated position -- fails even when the depth,
+    sides and recomputed root all match.
+    """
+    steps = _proof_path(index, size, path)
+    if steps is None:
+        return False
+    widths = _level_widths(size)
     current = leaf
-    for step in path:
+    position = index
+    for level, step in enumerate(steps):
+        if widths[level] % 2 and position == widths[level] - 1:
+            if step["hash"] != current.hex():
+                return False
         sibling = bytes.fromhex(step["hash"])
         current = node_hash(current, sibling) if step["side"] == "right" else node_hash(sibling, current)
+        position //= 2
     return current.hex() == root
 
 
@@ -187,10 +213,8 @@ def _check_boundary(boundary: dict, index: int, relation: str, account: str, roo
             return False
     elif not name > account:
         return False
-    path = _proof_path(index, size, boundary["path"])
-    if path is None:
-        return False
-    return _recompute_root(_leaf(name, balance), index, path, root)
+    path = boundary["path"]
+    return _check_merkle_path(_leaf(name, balance), index, size, path, root)
 
 
 class State:
@@ -624,8 +648,11 @@ class State:
         exactly ``account``, ``balance``, ``index``, ``size``, ``root`` and ``path``, all
         numeric fields non-boolean integers (balance non-negative, size positive, index in
         range), hashes as 64 lowercase hex characters, and a sibling path whose depth and
-        sides match the tree shape ``size`` implies. Any mismatch, type confusion, encoding
-        oddity, out-of-range index or non-closing path returns False.
+        sides match the tree shape ``size`` implies. Where the path meets the last real
+        node of an odd-width level, the sibling must equal that node itself (the
+        duplicated tail), at the leaf level and every higher level. Any mismatch, type
+        confusion, encoding oddity, out-of-range index, wrong duplicated-tail sibling or
+        non-closing path returns False.
         """
         try:
             if not isinstance(proof, dict) or set(proof) != {
@@ -644,10 +671,7 @@ class State:
             root = proof["root"]
             if not _is_hex64(root):
                 return False
-            path = _proof_path(index, size, proof["path"])
-            if path is None:
-                return False
-            return _recompute_root(_leaf(account, balance), index, path, root)
+            return _check_merkle_path(_leaf(account, balance), index, size, proof["path"], root)
         except (KeyError, TypeError, ValueError):
             return False
 
@@ -687,7 +711,9 @@ class State:
         ``size`` must be at least ``count``, and items must be strictly ascending by
         non-empty name with continuous indices 0..count-1, non-negative integer
         balances, and sibling paths that each recompute the one root over a tree of
-        ``size`` leaves. A zero count is anchored solely by the empty-tree root (size 0
+        ``size`` leaves and obey the odd-level duplicated-tail rule (a path landing on
+        the last real node of an odd-width level must carry that very node as its
+        sibling). A zero count is anchored solely by the empty-tree root (size 0
         and no items). Any mismatch, type confusion or broken path returns False.
         """
         try:
@@ -722,8 +748,7 @@ class State:
                     return False
                 if not _is_int(index) or index != position:
                     return False
-                path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if not _check_merkle_path(_leaf(name, balance), index, size, item["path"], root):
                     return False
                 previous = name
             return True
@@ -761,7 +786,9 @@ class State:
         ``start < end`` and match the proof's own bounds, ``size`` must be at least
         ``end``, and items must be strictly ascending by non-empty name with continuous
         indices ``start..end-1``, non-negative integer balances, and sibling paths that
-        each recompute the one root over a tree of ``size`` leaves. Any mismatch, type
+        each recompute the one root over a tree of ``size`` leaves and obey the
+        odd-level duplicated-tail rule (a path landing on the last real node of an
+        odd-width level must carry that very node as its sibling). Any mismatch, type
         confusion, encoding oddity or broken path returns False.
         """
         try:
@@ -797,8 +824,7 @@ class State:
                     return False
                 if not _is_int(item["index"]) or item["index"] != index:
                     return False
-                path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if not _check_merkle_path(_leaf(name, balance), index, size, item["path"], root):
                     return False
                 previous = name
             return True
@@ -851,8 +877,10 @@ class State:
         ``end``, and items must fill the whole index gap between them; an empty
         interval is thus anchored by adjacent boundaries or a null end. With size 0
         both boundaries must be null, items empty and the root the empty-tree root.
-        Any mismatch, type confusion, encoding oddity, gap or broken path returns
-        False.
+        Every path obeys the odd-level duplicated-tail rule: a step landing on the
+        last real node of an odd-width level must carry that very node as its
+        sibling. Any mismatch, type confusion, encoding oddity, gap or broken path
+        returns False.
         """
         try:
             if (not isinstance(start, str) or not start or not isinstance(end, str)
@@ -898,8 +926,7 @@ class State:
                     return None
                 if not 0 <= index < size:
                     return None
-                path = _proof_path(index, size, boundary["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if not _check_merkle_path(_leaf(name, balance), index, size, boundary["path"], root):
                     return None
                 return index
 
@@ -932,8 +959,7 @@ class State:
                     return False
                 if item["index"] != index:
                     return False
-                path = _proof_path(index, size, item["path"])
-                if path is None or not _recompute_root(_leaf(name, balance), index, path, root):
+                if not _check_merkle_path(_leaf(name, balance), index, size, item["path"], root):
                     return False
                 last_name = name
             return True
@@ -981,8 +1007,10 @@ class State:
         the empty-tree root. With a positive size a missing boundary means the target lies
         beyond that end of the account order; any present boundary must hold a genuine
         account strictly bracketing the target, the indices must be adjacent (or pinned to
-        the first/last slot), and both paths must recompute the one root. Every
-        inconsistency, tampering, type confusion or encoding oddity returns False.
+        the first/last slot), and both paths must recompute the one root while
+        obeying the odd-level duplicated-tail rule (a step landing on the last
+        real node of an odd-width level must carry that very node as its sibling).
+        Every inconsistency, tampering, type confusion or encoding oddity returns False.
         """
         try:
             if not isinstance(proof, dict) or set(proof) != {"account", "root", "size", "prev", "next"}:
