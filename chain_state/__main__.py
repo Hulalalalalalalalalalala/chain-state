@@ -73,6 +73,8 @@ def _parser() -> argparse.ArgumentParser:
     prove_name_range = sub.add_parser("prove-name-range", help="print a name half-range proof as JSON")
     prove_name_range.add_argument("start")
     prove_name_range.add_argument("end")
+    prove_many = sub.add_parser("prove-many", help="print a compact inclusion proof for many accounts as JSON")
+    prove_many.add_argument("accounts", help="accounts JSON array, or - to read it from stdin")
     verify = sub.add_parser("verify", help="verify an inclusion proof")
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
@@ -91,6 +93,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_name_range.add_argument("start")
     verify_name_range.add_argument("end")
     verify_name_range.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_many = sub.add_parser("verify-many", help="verify a compact multi-account inclusion proof")
+    verify_many.add_argument("accounts", help="accounts JSON array")
+    verify_many.add_argument("expected_root")
+    verify_many.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -131,6 +137,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(state.prove_range(args.start, args.end), sort_keys=True))
         elif args.command == "prove-name-range":
             print(json.dumps(state.prove_name_range(args.start, args.end), sort_keys=True))
+        elif args.command == "prove-many":
+            raw = sys.stdin.read() if args.accounts == "-" else args.accounts
+            print(json.dumps(state.prove_many(json.loads(raw)), sort_keys=True))
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
@@ -154,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-name-range":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify_name_range(args.start, args.end, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-many":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            ok = state.verify_many(json.loads(args.accounts), args.expected_root, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":

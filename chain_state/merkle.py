@@ -9,7 +9,12 @@ from __future__ import annotations
 import hashlib
 from typing import Iterable, Sequence
 
-__all__ = ["leaf_hash", "node_hash", "merkle_root", "merkle_proof", "verify_proof"]
+__all__ = ["leaf_hash", "node_hash", "merkle_root", "merkle_proof", "verify_proof", "tree_levels"]
+
+
+def tree_levels(leaves: Sequence[bytes]) -> list[list[bytes]]:
+    """All levels of the duplicated-last-node tree, each holding the real (unpadded) nodes."""
+    return _levels(leaves)
 
 
 def leaf_hash(data: bytes) -> bytes:

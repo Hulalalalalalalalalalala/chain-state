@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from .merkle import leaf_hash, merkle_proof, merkle_root, node_hash
+from .merkle import leaf_hash, merkle_proof, merkle_root, node_hash, tree_levels
 
 __all__ = ["State"]
 
@@ -766,5 +766,184 @@ class State:
                 if not _check_boundary(following, next_index, "next", account, root, size):
                     return False
             return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def prove_many(self, accounts: object) -> dict:
+        """Compact inclusion proof for an arbitrary non-empty set of accounts.
+
+        ``accounts`` must be a non-empty array of unique non-empty strings; order is
+        irrelevant. A malformed structure, a bad element type or a duplicate raises
+        ``ValueError`` and an unknown account raises ``KeyError``; like every read, an
+        uninitialised state raises ``FileNotFoundError`` only after the arguments check
+        out. The proof shares the leaves and state root of the single-entry proofs but
+        carries the siblings once for the whole selection: ``items`` lists the chosen
+        accounts in ascending name order with their full-list index and balance, and
+        ``nodes`` lists exactly the real sibling hashes missing to reconnect those
+        leaves to the root, each as ``level``/``index``/``hash``. Siblings that are a
+        duplicated odd-level end node are never included; proving every account yields
+        an empty ``nodes`` list. Generation never changes the accounts, version or
+        snapshots.
+        """
+        if not isinstance(accounts, list) or not accounts:
+            raise ValueError("accounts must be a non-empty JSON array")
+        chosen: set[str] = set()
+        for account in accounts:
+            if not isinstance(account, str) or not account:
+                raise ValueError("accounts must contain only non-empty strings")
+            if account in chosen:
+                raise ValueError(f"duplicate account {account!r}")
+            chosen.add(account)
+
+        document = self._read()
+        state_accounts = document["accounts"]
+        for account in accounts:
+            if account not in state_accounts:
+                raise KeyError(f"unknown account {account!r}")
+        names = sorted(state_accounts)
+        balances = {name: int(state_accounts[name]) for name in names}
+        leaves = [_leaf(name, balances[name]) for name in names]
+        levels = tree_levels(leaves)
+
+        positions = {names.index(name) for name in chosen}
+        items = [{"account": names[i], "balance": balances[names[i]], "index": i}
+                 for i in sorted(positions)]
+        known = {(0, i) for i in positions}
+        nodes: list[dict] = []
+        for level in range(len(levels) - 1):
+            current = levels[level]
+            padded_size = len(current) + (len(current) % 2)
+            next_known: set[tuple[int, int]] = set()
+            for parent in range(padded_size // 2):
+                left, right = 2 * parent, 2 * parent + 1
+                left_known = (level, left) in known
+                right_known = (level, right) in known or (
+                    right == len(current) and (level, left) in known
+                )
+                if left_known and right_known:
+                    next_known.add((level + 1, parent))
+                elif left_known:
+                    # The missing right slot is the duplicated odd end when it sits one
+                    # past the level; the verifier reconstructs that, so emit nothing.
+                    if right < len(current):
+                        nodes.append({"level": level, "index": right, "hash": current[right].hex()})
+                    next_known.add((level + 1, parent))
+                elif right_known:
+                    nodes.append({"level": level, "index": left, "hash": current[left].hex()})
+                    next_known.add((level + 1, parent))
+            known |= next_known
+        return {"root": _root_for(state_accounts), "size": len(names),
+                "items": items, "nodes": nodes}
+
+    def verify_many(self, accounts: object, expected_root: object, proof: object) -> bool:
+        """Verify a compact multi-account inclusion proof using the proof alone.
+
+        The state directory is never read. ``accounts`` must be a non-empty array of
+        unique non-empty strings equal as a set to the proof's items, ``expected_root``
+        a 64-char lowercase hex string equal to ``proof["root"]``, and the proof an
+        object holding exactly ``root``, ``size``, ``items`` and ``nodes``. Items must
+        be strictly ascending by name and by full-list index, with non-negative
+        integer balances and in-range indices; nodes must be strictly ascending
+        ``level``/``index`` pairs of real nodes (never the odd-level duplicate), every
+        one consumed exactly once as the missing sibling while the supplied leaves and
+        nodes recompute the one root. Any invalid argument, missing or extra field,
+        duplicate or redundant node, set mismatch, out-of-range position or root
+        mismatch returns False.
+        """
+        try:
+            if not isinstance(accounts, list) or not accounts:
+                return False
+            query: set[str] = set()
+            for account in accounts:
+                if not isinstance(account, str) or not account or account in query:
+                    return False
+                query.add(account)
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {"root", "size", "items", "nodes"}:
+                return False
+            if proof["root"] != expected_root:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size <= 0 or len(query) > size:
+                return False
+            root = proof["root"]
+            items, nodes = proof["items"], proof["nodes"]
+            if not isinstance(items, list) or len(items) != len(query) or not isinstance(nodes, list):
+                return False
+
+            known: dict[tuple[int, int], bytes] = {}
+            last_name: str | None = None
+            last_index = -1
+            item_names: set[str] = set()
+            for item in items:
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index"}:
+                    return False
+                name, balance, index = item["account"], item["balance"], item["index"]
+                if not isinstance(name, str) or not name or name in item_names or name not in query:
+                    return False
+                if last_name is not None and not last_name < name:
+                    return False
+                if not _is_int(balance) or balance < 0 or not _is_int(index):
+                    return False
+                if not 0 <= index < size or index <= last_index:
+                    return False
+                known[(0, index)] = _leaf(name, balance)
+                item_names.add(name)
+                last_name, last_index = name, index
+            if item_names != query:
+                return False
+
+            depth = (size - 1).bit_length()
+            level_size = size
+            provided: dict[tuple[int, int], bytes] = {}
+            last_level, last_node_index = -1, -1
+            for node in nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, node_index, node_digest = node["level"], node["index"], node["hash"]
+                if not _is_int(level) or not _is_int(node_index) or not _is_hex64(node_digest):
+                    return False
+                if not 0 <= level < depth:
+                    return False
+                real_size = size
+                for _ in range(level):
+                    real_size = (real_size + 1) // 2
+                if not 0 <= node_index < real_size:
+                    return False
+                if (level, node_index) <= (last_level, last_node_index):
+                    return False
+                provided[(level, node_index)] = bytes.fromhex(node_digest)
+                last_level, last_node_index = level, node_index
+
+            unused = set(provided)
+            for level in range(depth):
+                padded_size = level_size + (level_size % 2)
+                next_known: dict[tuple[int, int], bytes] = {}
+                for parent in range(padded_size // 2):
+                    left, right = 2 * parent, 2 * parent + 1
+                    left_value = known.get((level, left))
+                    right_value = known.get((level, right))
+                    if right_value is None and right == level_size:
+                        right_value = known.get((level, left))
+                    if left_value is not None and right_value is not None:
+                        next_known[(level + 1, parent)] = node_hash(left_value, right_value)
+                    elif left_value is not None:
+                        key = (level, right)
+                        if key not in provided:
+                            return False
+                        right_value = provided[key]
+                        unused.discard(key)
+                        next_known[(level + 1, parent)] = node_hash(left_value, right_value)
+                    elif right_value is not None:
+                        key = (level, left)
+                        if key not in provided:
+                            return False
+                        left_value = provided[key]
+                        unused.discard(key)
+                        next_known[(level + 1, parent)] = node_hash(left_value, right_value)
+                known.update(next_known)
+                level_size = padded_size // 2
+            return not unused and known.get((depth, 0)) is not None and known[(depth, 0)].hex() == root
         except (KeyError, TypeError, ValueError):
             return False
