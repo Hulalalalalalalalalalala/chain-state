@@ -25,6 +25,7 @@ python3 -m chain_state --root ./state transfer-many '[{"source":"alice","target"
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state transfer-many -
 python3 -m chain_state --root ./state transfer-many-once req-1 <old-root> '[{"source":"alice","target":"bob","amount":10}]'
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state transfer-many-once req-1 <old-root> -
+python3 -m chain_state --root ./state transfer-receipt req-1
 python3 -m chain_state --root ./state prove-transfers '[{"source":"alice","target":"bob","amount":10}]'
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state prove-transfers -
 python3 -m chain_state --root ./state verify-transfers '[{"source":"alice","target":"bob","amount":10}]' <root> <proof>
@@ -54,7 +55,7 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 

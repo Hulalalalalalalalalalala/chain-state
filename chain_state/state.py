@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import copy
 import json
 import os
 import re
@@ -23,6 +24,7 @@ __all__ = ["State"]
 STATE_FILE = "state.json"
 SNAPSHOTS_KEY = "snapshots"
 REQUESTS_KEY = "requests"
+RECEIPTS_KEY = "receipts"
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -226,6 +228,75 @@ def _validate_request_record(record: object) -> dict:
     return {"version": version, "root": root, "transfers": transfers}
 
 
+def _transfer_preview(state_accounts: dict, normalized: list[dict]) -> dict:
+    """Build the transfer-batch preview proof from an already validated batch.
+
+    Shares its exact output shape with :meth:`State.prove_transfers`, so a proof stored
+    at settlement time is JSON-equal to the one the pre-commit preview returns. Every
+    endpoint must already exist; the batch settles in order and an uncovered debit
+    raises ``ValueError``.
+    """
+    names = sorted(state_accounts)
+    endpoint_names = {endpoint for transfer in normalized
+                      for endpoint in (transfer["source"], transfer["target"])}
+    chosen = sorted(names.index(name) for name in endpoint_names)
+    leaves = [_leaf(n, int(state_accounts[n])) for n in names]
+    items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
+              "index": index} for index in chosen]
+    root = merkle_root(leaves).hex()
+    balances = {name: int(balance) for name, balance in state_accounts.items()}
+    for transfer in normalized:
+        source, target, amount = (transfer["source"], transfer["target"],
+                                  transfer["amount"])
+        if balances[source] < amount:
+            raise ValueError(
+                f"insufficient funds: {source!r} has {balances[source]}, needs {amount}"
+            )
+        balances[source] -= amount
+        balances[target] += amount
+    new_leaves = list(leaves)
+    for index in chosen:
+        name = names[index]
+        new_leaves[index] = _leaf(name, balances[name])
+    new_root = merkle_root(new_leaves).hex()
+    nodes = [{"level": level, "index": index, "hash": hash_value}
+             for level, index, hash_value in merkle_multiproof(leaves, chosen)]
+    return {"root": root, "new_root": new_root, "size": len(names),
+            "items": items, "nodes": nodes}
+
+
+def _validate_receipt(receipt: object) -> dict:
+    """Validate one persisted settlement receipt's shape and return a normalized copy.
+
+    A receipt carries exactly ``request_id`` (a non-empty string), ``version`` (a
+    non-negative JSON integer), ``transfers`` (a valid :meth:`transfer_many` batch)
+    and ``proof`` (a transfer preview proof object). Missing or extra fields and
+    type confusion raise ``ValueError``; matching the receipt against its success
+    record and verifying the proof against the recorded old root are the caller's
+    responsibility.
+    """
+    if not isinstance(receipt, dict) or set(receipt) != {
+        "request_id", "version", "transfers", "proof"
+    }:
+        raise ValueError(
+            "corrupt transfer receipt: expected exactly request_id, version, transfers and proof"
+        )
+    request_id = receipt["request_id"]
+    if not isinstance(request_id, str) or not request_id:
+        raise ValueError("corrupt transfer receipt: request id must be a non-empty string")
+    version = receipt["version"]
+    if not _is_int(version) or version < 0:
+        raise ValueError("corrupt transfer receipt: version must be a non-negative integer")
+    transfers = _validate_transfers(receipt["transfers"])
+    proof = receipt["proof"]
+    if not isinstance(proof, dict) or set(proof) != {
+        "root", "new_root", "size", "items", "nodes"
+    }:
+        raise ValueError("corrupt transfer receipt: proof must be a transfer preview proof object")
+    return {"request_id": request_id, "version": version, "transfers": transfers,
+            "proof": copy.deepcopy(proof)}
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -253,12 +324,12 @@ class State:
     def init(self) -> None:
         """Create an empty state, replacing any existing one.
 
-        Snapshots and successful once-request records are reset along with the
-        accounts and version.
+        Snapshots, successful once-request records and their receipts are reset
+        along with the accounts and version.
         """
         self.directory.mkdir(parents=True, exist_ok=True)
         self._write({"version": 0, "accounts": {}, SNAPSHOTS_KEY: {},
-                     REQUESTS_KEY: {}})
+                     REQUESTS_KEY: {}, RECEIPTS_KEY: {}})
 
     def _read(self) -> dict:
         if not self.path.is_file():
@@ -326,6 +397,22 @@ class State:
         if not isinstance(requests, dict):
             raise ValueError("corrupt request records: expected a JSON object")
         return requests
+
+    @staticmethod
+    def _receipts(document: dict) -> dict:
+        """The settlement receipts, treating a state file without them as empty.
+
+        A missing key is added to ``document`` so callers can persist new receipts;
+        a present-but-wrong-typed value is treated as corruption. Receipts never
+        participate in the state root, are not part of snapshots and are not written
+        for success records created before receipts existed.
+        """
+        if RECEIPTS_KEY not in document:
+            document[RECEIPTS_KEY] = {}
+        receipts = document[RECEIPTS_KEY]
+        if not isinstance(receipts, dict):
+            raise ValueError("corrupt transfer receipts: expected a JSON object")
+        return receipts
 
     # -- public interface -------------------------------------------------------------
 
@@ -503,20 +590,23 @@ class State:
 
         A first success requires the current root to equal ``expected_root``; it
         settles the whole batch in order, advances the version exactly once (even
-        when every final balance is unchanged) and records the request. A repeat
+        when every final balance is unchanged), records the request and stores a
+        settlement receipt. The receipt's proof is built before the write and is
+        JSON-equal to what :meth:`prove_transfers` returns from the same old state,
+        and the settled root equals that proof's ``new_root``. A repeat
         carrying the same id, old root and batch returns the first success's
-        version without settling or writing, even if the accounts changed or a
-        snapshot was restored in between. Batch equality preserves array order and
-        duplicates and ignores object key order. The same id with another old root
-        or batch raises ``RuntimeError``; a new id against a mismatched current root
+        version without settling or writing (so a repeat never backfills a
+        missing receipt), even if the accounts changed or a snapshot was restored
+        in between. Batch equality preserves array order and duplicates and
+        ignores object key order. The same id with another old root or batch
+        raises ``RuntimeError``; a new id against a mismatched current root
         raises ``RuntimeError`` as well. After the repeat check the old root is
         compared, then every endpoint is checked -- an unknown endpoint raises
         ``KeyError`` -- and only then does the batch settle, with an insufficient
-        balance raising ``ValueError``. A failed attempt neither consumes the id nor
-        mutates the input; accounts, root, version, snapshots and records all stay
-        unchanged. The settled root equals the ``new_root``
-        :meth:`prove_transfers` returns from the same old state; the root
-        constraint is independent of the version.
+        balance raising ``ValueError``. A failed attempt neither consumes the id
+        nor mutates the input; accounts, root, version, snapshots, records and
+        receipts all stay unchanged. The root constraint is independent of the
+        version.
         """
         if not isinstance(request_id, str) or not request_id:
             raise ValueError("request id must be a non-empty string")
@@ -527,10 +617,12 @@ class State:
         document = self._read()
         accounts = document["accounts"]
         requests = self._requests(document)
+        receipts = self._receipts(document)
         current_root = _root_for(accounts)
 
         # Repeat requests win over every state-level check: a recorded success
         # replays its version regardless of later account changes or restores.
+        # A repeat never writes, so it can never backfill a missing receipt.
         if request_id in requests:
             saved = _validate_request_record(requests[request_id])
             if saved["root"] != expected_root or saved["transfers"] != normalized:
@@ -548,6 +640,9 @@ class State:
                 raise KeyError(f"unknown account {transfer['source']!r}")
             if transfer["target"] not in accounts:
                 raise KeyError(f"unknown account {transfer['target']!r}")
+        # Build the receipt proof from the old accounts before anything is mutated;
+        # this also re-runs the in-order balance check.
+        proof = _transfer_preview(accounts, normalized)
         balances = {name: int(balance) for name, balance in accounts.items()}
         for transfer in normalized:
             source, target, amount = (transfer["source"], transfer["target"],
@@ -564,6 +659,11 @@ class State:
         requests[request_id] = {
             "version": document["version"], "root": expected_root,
             "transfers": normalized}
+        # The record and receipt land in the same atomic document write, so a
+        # settled batch and its receipt are never observed apart.
+        receipts[request_id] = {
+            "request_id": request_id, "version": document["version"],
+            "transfers": copy.deepcopy(normalized), "proof": copy.deepcopy(proof)}
         self._write(document)
         return document["version"]
 
@@ -589,33 +689,7 @@ class State:
                 raise KeyError(f"unknown account {transfer['source']!r}")
             if transfer["target"] not in state_accounts:
                 raise KeyError(f"unknown account {transfer['target']!r}")
-        names = sorted(state_accounts)
-        endpoint_names = {endpoint for transfer in normalized
-                          for endpoint in (transfer["source"], transfer["target"])}
-        chosen = sorted(names.index(name) for name in endpoint_names)
-        leaves = [_leaf(n, int(state_accounts[n])) for n in names]
-        items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
-                  "index": index} for index in chosen]
-        root = merkle_root(leaves).hex()
-        balances = {name: int(balance) for name, balance in state_accounts.items()}
-        for transfer in normalized:
-            source, target, amount = (transfer["source"], transfer["target"],
-                                      transfer["amount"])
-            if balances[source] < amount:
-                raise ValueError(
-                    f"insufficient funds: {source!r} has {balances[source]}, needs {amount}"
-                )
-            balances[source] -= amount
-            balances[target] += amount
-        new_leaves = list(leaves)
-        for index in chosen:
-            name = names[index]
-            new_leaves[index] = _leaf(name, balances[name])
-        new_root = merkle_root(new_leaves).hex()
-        nodes = [{"level": level, "index": index, "hash": hash_value}
-                 for level, index, hash_value in merkle_multiproof(leaves, chosen)]
-        return {"root": root, "new_root": new_root, "size": len(names),
-                "items": items, "nodes": nodes}
+        return _transfer_preview(state_accounts, normalized)
 
     def verify_transfers(self, batch: object, expected_root: object, proof: object) -> bool:
         """Verify a transfer-batch preview proof using the proof alone; no state is read.
@@ -715,6 +789,56 @@ class State:
             return rebuilt is not None and rebuilt.hex() == new_root
         except (KeyError, TypeError, ValueError):
             return False
+
+    def transfer_receipt(self, request_id: object) -> dict | None:
+        """Return the settlement receipt recorded for ``request_id`` without writing.
+
+        ``request_id`` must be a non-empty string; a non-string or empty value raises
+        ``ValueError`` before the state is read, so a legal id against an
+        uninitialised directory raises ``FileNotFoundError``. An unknown id raises
+        ``KeyError``, while a known success recorded before receipts existed -- or
+        anyhow lacking a receipt -- returns ``None``; neither a query nor a retried
+        :meth:`transfer_many_once` ever backfills such a receipt.
+
+        On success the returned object carries exactly ``request_id``, ``version``,
+        ``transfers`` and ``proof``, as independent deep copies: the id, version and
+        batch match the first successful record (batch order and duplicates
+        preserved), and ``proof`` is the preview proof stored at submission time,
+        which verifies under :meth:`verify_transfers` against the recorded old root
+        and settles to the state root right after that submission. A receipt whose
+        fields or types are illegal, whose id, version or batch disagree with its
+        success record, or whose proof cannot be verified against the recorded old
+        root raises ``ValueError`` rather than returning ``None``. The query never
+        modifies the file or the version, and later account changes or snapshot
+        restores do not affect the historical proof.
+        """
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("request id must be a non-empty string")
+        document = self._read()
+        requests = self._requests(document)
+        if request_id not in requests:
+            raise KeyError(f"unknown request {request_id!r}")
+        saved = _validate_request_record(requests[request_id])
+        receipts = self._receipts(document)
+        if request_id not in receipts:
+            return None
+        # A present-but-null or otherwise unobject-like receipt is corruption, not
+        # the "old record without a receipt" case.
+        raw = receipts[request_id]
+        if not isinstance(raw, dict):
+            raise ValueError(
+                "corrupt transfer receipt: expected exactly request_id, version, transfers and proof"
+            )
+        receipt = _validate_receipt(raw)
+        if receipt["request_id"] != request_id:
+            raise ValueError("corrupt transfer receipt: request id does not match its record")
+        if receipt["version"] != saved["version"]:
+            raise ValueError("corrupt transfer receipt: version does not match the success record")
+        if receipt["transfers"] != saved["transfers"]:
+            raise ValueError("corrupt transfer receipt: transfers do not match the success record")
+        if not self.verify_transfers(receipt["transfers"], saved["root"], receipt["proof"]):
+            raise ValueError("corrupt transfer receipt: proof cannot be verified against the recorded root")
+        return copy.deepcopy(receipt)
 
     def version(self) -> int:
         """Current version number; 0 for an untouched state."""
