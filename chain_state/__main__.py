@@ -55,6 +55,10 @@ def _parser() -> argparse.ArgumentParser:
     transfer.add_argument("amount", type=_positive_int)
     transfer_many = sub.add_parser("transfer-many", help="atomically settle a batch of transfers from inline JSON")
     transfer_many.add_argument("transfers", help="transfers JSON array, or - to read it from stdin")
+    transfer_many_once = sub.add_parser("transfer-many-once", help="idempotently settle a batch bound to an old root and request id")
+    transfer_many_once.add_argument("request_id", help="non-empty request identifier")
+    transfer_many_once.add_argument("expected_root", help="expected old state root (64 lowercase hexadecimal characters)")
+    transfer_many_once.add_argument("transfers", help="transfers JSON array, or - to read it from stdin")
     read = sub.add_parser("get", help="read an account balance")
     read.add_argument("account")
     sub.add_parser("root", help="print the state root")
@@ -148,6 +152,10 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "transfer-many":
             raw = sys.stdin.read() if args.transfers == "-" else args.transfers
             print(state.transfer_many(json.loads(raw)))
+        elif args.command == "transfer-many-once":
+            raw = sys.stdin.read() if args.transfers == "-" else args.transfers
+            print(state.transfer_many_once(args.request_id, args.expected_root,
+                                           json.loads(raw)))
         elif args.command == "get":
             print(state.get(args.account))
         elif args.command == "root":
@@ -242,6 +250,9 @@ def main(argv: list[str] | None = None) -> int:
                               "readiness": {"stateRoot": True, "inclusionProof": True, "reorg": False}}, ensure_ascii=False, sort_keys=True))
         return 0
     except FileNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    except (RuntimeError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     except (KeyError, ValueError) as error:

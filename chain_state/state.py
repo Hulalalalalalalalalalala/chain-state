@@ -8,7 +8,9 @@ the contents and not on the order in which accounts were written.
 from __future__ import annotations
 
 import bisect
+import contextlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -19,6 +21,7 @@ __all__ = ["State"]
 
 STATE_FILE = "state.json"
 SNAPSHOTS_KEY = "snapshots"
+REQUESTS_KEY = "requests"
 
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -202,6 +205,26 @@ def _validate_transfers(batch: object) -> list[dict]:
     return normalized
 
 
+def _validate_request_record(record: object) -> dict:
+    """Validate one persisted once-request record and return an independent normalized copy.
+
+    A record carries exactly ``root`` (64 lowercase hex characters), ``transfers`` (a
+    valid non-empty transfer batch, in order) and ``version`` (the version returned by
+    the first successful submission, a positive JSON integer). Missing fields, type
+    confusion or an invalid batch raise ``ValueError``.
+    """
+    if not isinstance(record, dict) or set(record) != {"root", "transfers", "version"}:
+        raise ValueError("corrupt request: expected exactly root, transfers and version")
+    root = record["root"]
+    if not _is_hex64(root):
+        raise ValueError("corrupt request: root must be 64 lowercase hexadecimal characters")
+    transfers = _validate_transfers(record["transfers"])
+    version = record["version"]
+    if not _is_int(version) or version <= 0:
+        raise ValueError("corrupt request: version must be a positive integer")
+    return {"root": root, "transfers": transfers, "version": version}
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -227,7 +250,11 @@ class State:
     # -- persistence ------------------------------------------------------------------
 
     def init(self) -> None:
-        """Create an empty state, replacing any existing one."""
+        """Create an empty state, replacing any existing one.
+
+        Snapshots and successful once-request records are cleared along with the
+        accounts; the reset keeps its original replacement semantics.
+        """
         self.directory.mkdir(parents=True, exist_ok=True)
         self._write({"version": 0, "accounts": {}})
 
@@ -237,8 +264,23 @@ class State:
         return json.loads(self.path.read_text(encoding="utf-8"))
 
     def _write(self, document: dict) -> None:
+        """Persist ``document`` atomically, leaving the old state file on failure.
+
+        The document is first written to a temporary file in the same directory and
+        then renamed over ``state.json``, so a failed write (disk full, permission
+        problem) raises ``OSError`` without truncating or corrupting the previous
+        file.
+        """
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(document, sort_keys=True, indent=2), encoding="utf-8")
+        payload = json.dumps(document, sort_keys=True, indent=2)
+        temporary = self.path.with_name(f".{STATE_FILE}.tmp.{os.getpid()}")
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+            raise
 
     @staticmethod
     def _snapshots(document: dict) -> dict:
@@ -253,6 +295,21 @@ class State:
         if not isinstance(snapshots, dict):
             raise ValueError("corrupt snapshots: expected a JSON object")
         return snapshots
+
+    @staticmethod
+    def _requests(document: dict) -> dict:
+        """The successful once-request records, treating a state file without them as empty.
+
+        A missing key is added to ``document`` so callers can persist new records; a
+        present-but-wrong-typed value is treated as corruption. Records never take
+        part in the state root and are not stored inside snapshots.
+        """
+        if REQUESTS_KEY not in document:
+            document[REQUESTS_KEY] = {}
+        requests = document[REQUESTS_KEY]
+        if not isinstance(requests, dict):
+            raise ValueError("corrupt requests: expected a JSON object")
+        return requests
 
     # -- public interface -------------------------------------------------------------
 
@@ -415,6 +472,75 @@ class State:
         for name, balance in balances.items():
             accounts[name] = balance
         document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
+    def transfer_many_once(self, request_id: object, expected_root: object,
+                           batch: object) -> int:
+        """Idempotently settle a transfer batch bound to an old root and request id.
+
+        ``request_id`` must be a non-empty string, ``expected_root`` exactly 64
+        lowercase hex characters and ``batch`` a valid non-empty transfer array (the
+        same input and in-order settlement rules as :meth:`transfer_many`); malformed
+        arguments raise ``ValueError`` before the state is read, so a legal call on an
+        uninitialised state raises ``FileNotFoundError``.
+
+        Successful requests are persisted under ``request_id`` together with the old
+        root, the exact batch (array order and duplicate items significant, object key
+        order ignored) and the version returned by the first successful submission.
+        Re-submitting the same id with the same root and batch replays nothing and
+        writes nothing: it returns that first version even when the accounts have
+        changed or a snapshot has been restored in the meantime. The same id paired
+        with any other root or batch raises ``RuntimeError``; a new id whose expected
+        root differs from the current root likewise raises ``RuntimeError``. Duplicate
+        requests are handled before the root is compared, and the root is compared
+        before every endpoint is checked (an unknown endpoint raises ``KeyError``) and
+        before the batch settles in order (insufficient funds raise ``ValueError``).
+
+        A first successful settlement adds exactly one version -- even when every
+        final balance equals its starting value -- and the resulting root is exactly
+        the ``new_root`` :meth:`prove_transfers` computes against the same old state,
+        independently of the version number. Balances, version and the success record
+        persist together in one atomic write; records never enter the state root and
+        are not saved or restored with snapshots. A rejected call occupies no id,
+        leaves accounts, root, version, snapshots and records untouched and never
+        modifies its input.
+        """
+        if not isinstance(request_id, str) or not request_id:
+            raise ValueError("request_id must be a non-empty string")
+        if not _is_hex64(expected_root):
+            raise ValueError("expected_root must be 64 lowercase hexadecimal characters")
+        normalized = _validate_transfers(batch)
+        document = self._read()
+        accounts = document["accounts"]
+        requests = self._requests(document)
+        if request_id in requests:
+            saved = _validate_request_record(requests[request_id])
+            if saved["root"] == expected_root and saved["transfers"] == normalized:
+                return saved["version"]
+            raise RuntimeError(f"request {request_id!r} already exists with different parameters")
+        if _root_for(accounts) != expected_root:
+            raise RuntimeError("current state root does not match expected root")
+        for transfer in normalized:
+            if transfer["source"] not in accounts:
+                raise KeyError(f"unknown account {transfer['source']!r}")
+            if transfer["target"] not in accounts:
+                raise KeyError(f"unknown account {transfer['target']!r}")
+        balances = {name: int(balance) for name, balance in accounts.items()}
+        for transfer in normalized:
+            source, target, amount = (transfer["source"], transfer["target"],
+                                      transfer["amount"])
+            if balances[source] < amount:
+                raise ValueError(
+                    f"insufficient funds: {source!r} has {balances[source]}, needs {amount}"
+                )
+            balances[source] -= amount
+            balances[target] += amount
+        for name, balance in balances.items():
+            accounts[name] = balance
+        document["version"] = int(document["version"]) + 1
+        requests[request_id] = {"root": expected_root, "transfers": normalized,
+                                "version": document["version"]}
         self._write(document)
         return document["version"]
 
