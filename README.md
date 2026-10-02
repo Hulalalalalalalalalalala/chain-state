@@ -45,6 +45,8 @@ echo '[<proof-a>,<proof-b>]' | python3 -m chain_state --root ./state compose-man
 python3 -m chain_state --root ./state prove-lookup '["alice","bob","carol"]'
 echo '["alice","bob","carol"]' | python3 -m chain_state --root ./state prove-lookup -
 python3 -m chain_state --root ./state verify-lookup '["alice","bob","carol"]' <root> <proof>
+python3 -m chain_state --root ./state compose-lookup '["alice","carol"]' <root> <sources>
+echo '[<lookup-proof-a>,<lookup-proof-b>]' | python3 -m chain_state --root ./state compose-lookup '["alice"]' <root> -
 python3 -m chain_state --root ./state prove-page '' 10
 python3 -m chain_state --root ./state verify-page '' 10 <root> <proof>
 python3 -m chain_state --root ./state prove-update '{"alice": 50, "bob": 0}'
@@ -57,7 +59,7 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`compose-many <accounts> <trusted-root> <sources>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`compose-many <accounts> <trusted-root> <sources>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`compose-lookup <accounts> <trusted-root> <sources>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -66,6 +68,8 @@ python3 -m chain_state --root ./state snapshots
 `compose-many` 离线重组：依次接收仅内联的目标账户 JSON 数组（名称规则同 `prove-many`，允许乱序）、可信状态根（64 个小写十六进制字符）与源证明 JSON 数组（非空，每项为多账户紧凑包含证明，允许来源重叠或完全重复；最后一个参数支持 `-` 从 stdin 读取）。重组只使用输入，不读取也不创建状态目录。成功输出生成的证明 JSON 并以 0 退出；参数非法、任一来源无法以自己的 items 名称集合通过 `verify-many`、根或总数不一致、同名余额/索引冲突、同索引对应不同名称或同位置节点哈希冲突以 2 退出（`ValueError`），全部来源合法但目标名称无任何 items 覆盖（节点哈希不算账户覆盖）以 2 退出（`KeyError`），JSON 语法错误或缺少参数也以 2 退出；失败时 stdout 为空、诊断写 stderr。
 
 `prove-lookup` 的参数与 stdin 支持对齐 `prove-many`（账户 JSON 数组，`-` 从 stdin 读取），但未知账户是正常结果而非错误；`verify-lookup` 的参数对齐 `verify-many`（账户 JSON 数组仅内联、可信状态根、证明 JSON 支持 `-`）。生成成功以 0 退出，非法输入以 2 退出，未 init 以 1 退出；验证输出 `valid`/`invalid` 并分别以 0/1 退出，JSON 语法错误或缺少参数以 2 退出。
+
+`compose-lookup` 离线重组：依次接收仅内联的目标账户 JSON 数组（名称规则同 `prove-lookup`，允许乱序，目标不必出现在任何来源的 results 中）、可信状态根（64 个小写十六进制字符）与来源查询证明 JSON 数组（非空，每项为既有混合查询证明，允许来源重叠或完全重复；最后一个参数支持 `-` 从 stdin 读取）。重组只使用输入，不读取也不创建状态目录。成功输出生成的证明 JSON 并以 0 退出；参数非法、任一来源无法以自己的 results 名称集合通过 `verify-lookup`、根或总数不一致、同名余额/索引冲突、同索引对应不同名称、名称与索引排序矛盾或同位置节点哈希冲突以 2 退出（`ValueError`），全部来源合法但任一目标无法确定（哈希或不相邻的夹逼条目不算覆盖）以 2 退出（`KeyError`），JSON 语法错误或缺少参数也以 2 退出；失败时 stdout 为空、诊断写 stderr。
 
 `prove-page` 依次接收名称起点 `start`（字符串，允许空串表示从首个账户开始）与正整数 `limit`（布尔不算整数）；`verify-page` 依次接收 `start`、`limit`、可信状态根与证明 JSON（证明参数支持 `-` 读 stdin）。生成成功输出证明 JSON 并以 0 退出，非法参数以 2 退出，未 init 以 1 退出；验证对参数非法、字段缺失或多余、类型错误、漏项、乱序、违规节点或根不符统一输出 `invalid` 并以 1 退出，成功输出 `valid` 并以 0 退出，JSON 语法错误或缺参数以 2 退出。
 
@@ -109,6 +113,7 @@ python3 -m chain_state --root ./state snapshots
 - `compose_many(accounts, trusted_root, sources) -> dict` 仅凭已有多账户包含证明与可信状态根离线重组出新的紧凑包含证明，不读取也不创建状态目录。`accounts` 沿用 `prove_many` 的名称规则（非空、互不重复的非空字符串，允许乱序），`trusted_root` 为 64 个小写十六进制字符，`sources` 为非空数组，每项为可由 `verify_many` 以自己的 items 名称集合、可信根验证通过的多账户证明，全部来源须具有相同的根与账户总数，允许来源重叠或完全重复。校验顺序为：先校验目标名称与根格式，再逐份校验全部来源，最后检查目标覆盖。参数非法、任一来源无效、总数不同、同名条目余额或索引冲突、同一索引对应不同名称或同位置节点哈希冲突抛 `ValueError`；全部来源合法但某目标名称未出现在任何 items 中时抛 `KeyError`（节点哈希不算账户覆盖）。输出与 `prove_many` 同形：只含目标账户明文条目与把它们连接到根所需的最小真实兄弟节点，沿用既有排序与奇数层复制规则，来源顺序、重复次数与目标顺序均不影响结果，覆盖全树时 `nodes` 为空；同一真实状态下输出与直接 `prove_many` 按 JSON 内容相等，可交给既有 `verify_many` 验证。单份裁剪、跨来源合并、零余额与单叶树均支持。输出与输入深层独立，调用不修改输入，也不触碰账户、版本、快照、成功记录或回执。
 - `prove_lookup(accounts) -> dict` 一次查询同时证明账户存在或不存在的紧凑证明；`accounts` 为非空数组，元素是互不重复的非空字符串，允许乱序，按名称排序处理。未知账户是正常结果，零余额账户仍算存在；结构、类型非法或名称重复抛 `ValueError`，合法参数但状态未初始化抛 `FileNotFoundError`。生成不改变账户、版本、状态根或快照。
 - `verify_lookup(accounts, expected_root, proof) -> bool` 仅凭证明与可信状态根验证存在/不存在查询，不读取状态目录；参数非法、查询集合与 results 不符、存在结果与同名条目不符、不满足既有不存在证明的名称夹逼及相邻边界规则、无关或缺失条目、违规节点、字段缺失或多余、非法类型与布尔冒充整数均返回 `False`；全部约束满足且重算根同时等于 `proof.root` 与可信根时返回 `True`。
+- `compose_lookup(accounts, trusted_root, sources) -> dict` 仅凭缓存的混合查询证明与可信状态根离线重组出新的存在/不存在查询证明，不读取也不创建状态目录。`accounts` 沿用 `prove_lookup` 的名称规则（非空、互不重复的非空字符串，允许乱序），目标不必出现在任何来源的 results 中；`trusted_root` 为 64 个小写十六进制字符；`sources` 为非空数组，每项为可由 `verify_lookup` 以自己的 results 名称集合、可信根验证通过的查询证明，全部来源须具有相同的根与账户总数，允许来源重叠或完全重复。校验顺序为：先校验目标名称与根格式，再逐份校验全部来源，最后判断覆盖。参数非法、任一来源无效、总数不同、同名条目余额或索引冲突、同一索引对应不同名称、名称与索引排序矛盾或同位置节点哈希冲突抛 `ValueError`。覆盖只依据来源 items 的并集（节点哈希不算覆盖）：联合条目中的同名条目（含边界条目与零余额账户）证明存在；两条严格夹住目标且全量索引相邻的明文条目证明不存在，两条边界允许来自不同来源；索引 0 条目之前、末索引条目之后及空树中的名称也证明不存在；哈希或不相邻的夹逼条目不算覆盖，任一目标无法确定时抛 `KeyError`。输出与 `prove_lookup` 同形：只回答目标账户，保留所需存在条目与边界的去重并集及把它们连接到根所需的最小真实兄弟节点，沿用既有排序与奇数层复制规则，来源顺序、重复次数与目标顺序均不影响结果；同一真实状态下输出与直接 `prove_lookup` 按 JSON 内容相等，可交给既有 `verify_lookup` 验证。单份裁剪、跨来源合并、单叶树与空树均支持。输出与输入深层独立，调用不修改输入，也不触碰账户、版本、快照、成功记录或回执。
 - `prove_page(start, limit) -> dict` 名称分页证明：返回名称升序中不小于 `start` 的前 `limit` 个账户。`start` 为字符串（允许空串，从首个账户起），`limit` 为正的 JSON 整数（布尔不算整数），否则抛 `ValueError`；合法参数但状态未初始化抛 `FileNotFoundError`。零余额账户仍参与分页；生成不改变账户、版本、状态根或快照。
 - `verify_page(start, limit, expected_root, proof) -> bool` 仅凭参数、可信状态根与证明验证名称分页，不读取状态目录；`expected_root` 须为 64 个小写十六进制字符。检查名称关系、连续全量索引、页长不超过 `limit`、不满页时 `next` 为 `null`、边界与条目共用的最小节点全部用完且重算根同时等于 `proof.root` 与可信根；参数非法、字段缺失或多余、类型错误、漏项、乱序、违规节点或根不符均返回 `False`，合法证明返回 `True`。
 - `prove_update(updates) -> dict` 只读的余额更新预览证明：`updates` 为非空 JSON 对象，账户名是非空字符串、新余额是非负 JSON 整数（布尔不算整数）。结构与类型校验先于读取状态：非法输入抛 `ValueError`，合法但未初始化抛 `FileNotFoundError`，任一账户不存在抛 `KeyError`；零余额账户仍算存在。证明只含 `root`、`new_root`、`size`、`items`、`nodes`：`root` 为当前根，`new_root` 为仅替换指定余额后的完整状态根，`items` 恰好含更新集合的旧余额（条目格式、排序、索引与节点最小规则沿用多账户证明）。更新全部账户时 `nodes` 为空；全部余额不变时两根相等。生成不改变账户、版本、快照与持久化内容，也不修改输入。
@@ -178,6 +183,15 @@ python3 -m chain_state --root ./state snapshots
 - 单份裁剪、跨来源合并、零余额账户与单叶树均支持；整个过程不读取或创建任何文件，输出与输入深层独立，调用不修改输入、账户、版本、快照、成功记录或回执。
 - `compose-many` 依次接收仅内联的目标账户 JSON 数组、可信根与源证明 JSON 数组（最后一个参数支持 `-` 从 stdin 读取）。成功输出证明 JSON 并以 0 退出；`ValueError`、`KeyError`、JSON 语法错误或缺少参数统一以 2 退出，stdout 为空且诊断写 stderr。
 
+`compose_lookup(accounts, trusted_root, sources)` 同样在不持有状态目录的情况下，仅凭缓存的混合查询证明与可信状态根，为另一组目标名称重组出可交给 `verify_lookup` 验证的存在/不存在证明；对应子命令为 `compose-lookup`。
+
+- 目标数组的名称规则与 `prove-lookup` 相同（非空、互不重复的非空字符串，允许乱序），目标不必出现在任何来源的 results 中；可信根为 64 个小写十六进制字符；`sources` 为非空数组，每项是既有格式的混合查询证明，来源之间允许重叠、乱序或完全重复。
+- 校验严格按序：先校验目标名称与根格式，再用每份来源自己的 results 名称集合调用既有 `verify_lookup`（根须等于可信根），并要求全部来源具有相同的账户总数；全部来源校验完成后才判断目标覆盖。参数非法、来源无效、总数不同、同名条目余额或索引冲突、同一索引对应不同名称、名称与索引排序矛盾或同位置节点哈希冲突均为 `ValueError`。
+- 覆盖只依据各来源 items 的并集：同名条目（含边界条目与零余额账户）证明存在；两条严格夹住目标且全量索引相邻的明文条目证明不存在，两条边界允许来自不同来源；索引 0 条目之前、末索引条目之后及空树中的名称同样证明不存在。哈希或不相邻的夹逼条目不算覆盖，任一目标无法确定时为 `KeyError`。
+- 重组的节点求解与 `compose_many` 相同：以全部已知叶子与兄弟节点自底向上按奇数层末节点复制规则闭包重建内部节点，再按与 `merkle_multiproof` 相同的规则求出最小真实兄弟位置。输出只回答目标账户，保留所需存在条目与边界的去重并集及最小真实兄弟节点，排序与奇数层复制规则同 `prove_lookup`，来源顺序、重复次数与目标顺序不影响结果；同一真实状态下输出与直接 `prove_lookup` 按 JSON 内容相等。
+- 单份裁剪、跨来源合并、单叶树与空树均支持；整个过程不读取或创建任何文件，输出与输入深层独立，调用不修改输入、账户、版本、快照、成功记录或回执。
+- `compose-lookup` 依次接收仅内联的目标账户 JSON 数组、可信根与来源证明 JSON 数组（最后一个参数支持 `-` 从 stdin 读取）。成功输出证明 JSON 并以 0 退出；`ValueError`、`KeyError`、JSON 语法错误或缺少参数统一以 2 退出，stdout 为空且诊断写 stderr。
+
 ### 存在/不存在混合查询证明
 
 证明为可序列化 JSON，只含 `root`、`size`、`results`、`items`、`nodes`：
@@ -233,7 +247,7 @@ python3 -m chain_state --root ./state snapshots
 ## 限制
 
 - 单进程、单文件状态，无并发写保护。
-- 版本号只增不减；分叉时的链上状态切换不在写入口范围内，但可凭已有证明与可信状态根通过 `compose_many` / `compose-many` 离线重组出任意账户子集的包含证明，全程不读取状态目录。
+- 版本号只增不减；分叉时的链上状态切换不在写入口范围内，但可凭已有证明与可信状态根通过 `compose_many` / `compose-many` 离线重组出任意账户子集的包含证明，或通过 `compose_lookup` / `compose-lookup` 从缓存的查询证明重组出另一组名称的存在/不存在证明，全程不读取状态目录。
 
 ## 语料
 

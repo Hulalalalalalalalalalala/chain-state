@@ -124,6 +124,12 @@ def _parser() -> argparse.ArgumentParser:
     compose_many.add_argument("accounts", help="target accounts JSON array (inline only)")
     compose_many.add_argument("trusted_root", help="trusted state root (64 lowercase hexadecimal characters)")
     compose_many.add_argument("sources", help="source proofs JSON array, or - to read it from stdin")
+    compose_lookup = sub.add_parser(
+        "compose-lookup",
+        help="offline-recompose a compact existence/absence lookup proof from cached lookup proofs")
+    compose_lookup.add_argument("accounts", help="target accounts JSON array (inline only)")
+    compose_lookup.add_argument("trusted_root", help="trusted state root (64 lowercase hexadecimal characters)")
+    compose_lookup.add_argument("sources", help="source lookup proofs JSON array, or - to read it from stdin")
     verify_lookup = sub.add_parser("verify-lookup", help="verify a compact existence/absence lookup proof for many accounts")
     verify_lookup.add_argument("accounts", help="accounts JSON array (inline only)")
     verify_lookup.add_argument("expected_root")
@@ -240,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
             raw = sys.stdin.read() if args.sources == "-" else args.sources
             accounts = json.loads(args.accounts)
             proof = state.compose_many(accounts, args.trusted_root, json.loads(raw))
+            print(json.dumps(proof, sort_keys=True))
+        elif args.command == "compose-lookup":
+            raw = sys.stdin.read() if args.sources == "-" else args.sources
+            accounts = json.loads(args.accounts)
+            proof = state.compose_lookup(accounts, args.trusted_root, json.loads(raw))
             print(json.dumps(proof, sort_keys=True))
         elif args.command == "verify-lookup":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
