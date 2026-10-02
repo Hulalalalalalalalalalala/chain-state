@@ -130,6 +130,15 @@ def _parser() -> argparse.ArgumentParser:
     compose_lookup.add_argument("accounts", help="target accounts JSON array (inline only)")
     compose_lookup.add_argument("trusted_root", help="trusted state root (64 lowercase hexadecimal characters)")
     compose_lookup.add_argument("sources", help="source lookup proofs JSON array, or - to read it from stdin")
+    advance_many = sub.add_parser(
+        "advance-many",
+        help="offline-advance a compact inclusion proof to the post-transfer root")
+    advance_many.add_argument("accounts", help="target accounts JSON array (inline only)")
+    advance_many.add_argument("trusted_old_root", help="trusted old state root (64 lowercase hexadecimal characters)")
+    advance_many.add_argument("trusted_new_root", help="trusted new state root (64 lowercase hexadecimal characters)")
+    advance_many.add_argument("old_proof", help="old inclusion proof JSON (inline only)")
+    advance_many.add_argument("transfers", help="transfers JSON array (inline only)")
+    advance_many.add_argument("transfer_proof", help="transfer preview proof JSON, or - to read it from stdin")
     verify_lookup = sub.add_parser("verify-lookup", help="verify a compact existence/absence lookup proof for many accounts")
     verify_lookup.add_argument("accounts", help="accounts JSON array (inline only)")
     verify_lookup.add_argument("expected_root")
@@ -251,6 +260,12 @@ def main(argv: list[str] | None = None) -> int:
             raw = sys.stdin.read() if args.sources == "-" else args.sources
             accounts = json.loads(args.accounts)
             proof = state.compose_lookup(accounts, args.trusted_root, json.loads(raw))
+            print(json.dumps(proof, sort_keys=True))
+        elif args.command == "advance-many":
+            raw = sys.stdin.read() if args.transfer_proof == "-" else args.transfer_proof
+            proof = state.advance_many(json.loads(args.accounts), args.trusted_old_root,
+                                       args.trusted_new_root, json.loads(args.old_proof),
+                                       json.loads(args.transfers), json.loads(raw))
             print(json.dumps(proof, sort_keys=True))
         elif args.command == "verify-lookup":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
