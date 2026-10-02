@@ -147,6 +147,35 @@ def _validate_updates(updates: object) -> dict[str, int]:
     return normalized
 
 
+def _validate_transfers(batch: object) -> list[dict]:
+    """Validate a batch of transfers: a non-empty array of exact transfer objects.
+
+    Each item must be a JSON object carrying exactly ``source``, ``target`` and
+    ``amount``: distinct non-empty names and a positive JSON integer (booleans are
+    not integers). Repeated transfers and repeated accounts are allowed. Returns
+    independent normalized copies; malformed structure or types raise ``ValueError``.
+    """
+    if not isinstance(batch, list) or not batch:
+        raise ValueError("transfers must be a non-empty array")
+    normalized: list[dict] = []
+    for transfer in batch:
+        if not isinstance(transfer, dict) or set(transfer) != {"source", "target", "amount"}:
+            raise ValueError("each transfer must be an object with exactly source, target and amount")
+        source = transfer["source"]
+        target = transfer["target"]
+        amount = transfer["amount"]
+        if not isinstance(source, str) or not source:
+            raise ValueError("source must be a non-empty string")
+        if not isinstance(target, str) or not target:
+            raise ValueError("target must be a non-empty string")
+        if source == target:
+            raise ValueError("source and target must be different accounts")
+        if not _is_int(amount) or amount <= 0:
+            raise ValueError("amount must be a positive integer")
+        normalized.append({"source": source, "target": target, "amount": amount})
+    return normalized
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -324,6 +353,195 @@ class State:
         document["version"] = int(document["version"]) + 1
         self._write(document)
         return document["version"]
+
+    def transfer_many(self, batch: object) -> int:
+        """Atomically settle a non-empty batch of transfers in order and return the new version.
+
+        ``batch`` is a non-empty JSON array; every item is an object carrying exactly
+        ``source``, ``target`` and ``amount``, with distinct non-empty names and a
+        positive JSON integer (booleans are not integers). Repeated transfers and
+        accounts are allowed. Every endpoint must already exist -- a zero-balance
+        account counts -- or ``KeyError`` is raised. Transfers settle in order, so a
+        credit from one transfer is available to a later debit; each source must hold
+        enough at its turn or ``ValueError`` is raised. Structure is validated before
+        the state is read, so malformed input raises ``ValueError`` while an
+        uninitialised state raises ``FileNotFoundError``. The batch adds exactly one
+        version (even when every final balance equals its starting value), drained
+        accounts keep their records, and a rejected batch changes neither the
+        accounts, version, root nor snapshots.
+        """
+        normalized = _validate_transfers(batch)
+        document = self._read()
+        accounts = document["accounts"]
+        for transfer in normalized:
+            if transfer["source"] not in accounts:
+                raise KeyError(f"unknown account {transfer['source']!r}")
+            if transfer["target"] not in accounts:
+                raise KeyError(f"unknown account {transfer['target']!r}")
+        balances = {name: int(balance) for name, balance in accounts.items()}
+        for transfer in normalized:
+            source, target, amount = (transfer["source"], transfer["target"],
+                                      transfer["amount"])
+            if balances[source] < amount:
+                raise ValueError(
+                    f"insufficient funds: {source!r} has {balances[source]}, needs {amount}"
+                )
+            balances[source] -= amount
+            balances[target] += amount
+        for name, balance in balances.items():
+            accounts[name] = balance
+        document["version"] = int(document["version"]) + 1
+        self._write(document)
+        return document["version"]
+
+    def prove_transfers(self, batch: object) -> dict:
+        """Read-only preview proof for an atomic transfer batch without writing.
+
+        ``batch`` follows the same rules as :meth:`transfer_many`; structure and types
+        are validated before the state is read (``ValueError``), an uninitialised state
+        raises ``FileNotFoundError``, an unknown endpoint raises ``KeyError`` and an
+        insufficient balance raises ``ValueError``. The proof carries the current
+        ``root``, the ``new_root`` after settling the whole batch in order, the total
+        ``size``, one ``items`` entry per de-duplicated endpoint holding its *old*
+        balance in the same compact layout as :meth:`prove_many`, and the minimal
+        ``nodes`` shared by both trees. Proving a batch whose endpoints cover every
+        account yields empty ``nodes``; when every final balance equals the old one the
+        two roots are equal. Nothing is persisted and the input array is never modified.
+        """
+        normalized = _validate_transfers(batch)
+        document = self._read()
+        state_accounts = document["accounts"]
+        for transfer in normalized:
+            if transfer["source"] not in state_accounts:
+                raise KeyError(f"unknown account {transfer['source']!r}")
+            if transfer["target"] not in state_accounts:
+                raise KeyError(f"unknown account {transfer['target']!r}")
+        names = sorted(state_accounts)
+        endpoint_names = {endpoint for transfer in normalized
+                          for endpoint in (transfer["source"], transfer["target"])}
+        chosen = sorted(names.index(name) for name in endpoint_names)
+        leaves = [_leaf(n, int(state_accounts[n])) for n in names]
+        items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
+                  "index": index} for index in chosen]
+        root = merkle_root(leaves).hex()
+        balances = {name: int(balance) for name, balance in state_accounts.items()}
+        for transfer in normalized:
+            source, target, amount = (transfer["source"], transfer["target"],
+                                      transfer["amount"])
+            if balances[source] < amount:
+                raise ValueError(
+                    f"insufficient funds: {source!r} has {balances[source]}, needs {amount}"
+                )
+            balances[source] -= amount
+            balances[target] += amount
+        new_leaves = list(leaves)
+        for index in chosen:
+            name = names[index]
+            new_leaves[index] = _leaf(name, balances[name])
+        new_root = merkle_root(new_leaves).hex()
+        nodes = [{"level": level, "index": index, "hash": hash_value}
+                 for level, index, hash_value in merkle_multiproof(leaves, chosen)]
+        return {"root": root, "new_root": new_root, "size": len(names),
+                "items": items, "nodes": nodes}
+
+    def verify_transfers(self, batch: object, expected_root: object, proof: object) -> bool:
+        """Verify a transfer-batch preview proof using the proof alone; no state is read.
+
+        Only a proof isomorphic to one :meth:`prove_transfers` emits is accepted: a JSON
+        object with exactly ``root``, ``new_root``, ``size``, ``items`` and ``nodes``.
+        The ``batch`` must be a valid non-empty transfer array, the endpoint de-dup set
+        must equal the proven accounts, and ``root`` must equal the trusted 64-lowercase
+        hex ``expected_root``. Items carry the strictly ascending old-balance entries in
+        the same compact layout as :meth:`verify_many`; the minimal nodes must recompute
+        ``root`` from the old leaves and ``new_root`` from the same leaves after the
+        whole batch settles in order with every per-transfer debit covered, consuming
+        every node exactly once in each recomputation. Invalid arguments, missing or
+        extra fields, a set mismatch, type confusion (including booleans), out-of-order
+        entries, out-of-range indices, insufficient balances, missing, duplicate or
+        surplus nodes, or either root being wrong returns False.
+        """
+        try:
+            normalized = _validate_transfers(batch)
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {
+                "root", "new_root", "size", "items", "nodes"
+            }:
+                return False
+            root = proof["root"]
+            new_root = proof["new_root"]
+            if not _is_hex64(root) or root != expected_root or not _is_hex64(new_root):
+                return False
+            size = proof["size"]
+            raw_items = proof["items"]
+            raw_nodes = proof["nodes"]
+            if (not _is_int(size) or size <= 0 or not isinstance(raw_items, list)
+                    or not isinstance(raw_nodes, list)):
+                return False
+            endpoints = {endpoint for transfer in normalized
+                         for endpoint in (transfer["source"], transfer["target"])}
+            if len(raw_items) != len(endpoints):
+                return False
+
+            old_leaves: dict[int, bytes] = {}
+            old_balances: dict[str, int] = {}
+            previous_name: str | None = None
+            previous_index = -1
+            for item in raw_items:
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index"}:
+                    return False
+                name = item["account"]
+                index = item["index"]
+                if not isinstance(name, str) or not name:
+                    return False
+                if previous_name is not None and not previous_name < name:
+                    return False
+                if not _is_int(item["balance"]) or item["balance"] < 0:
+                    return False
+                if not _is_int(index) or not previous_index < index < size:
+                    return False
+                old_leaves[index] = _leaf(name, item["balance"])
+                old_balances[name] = item["balance"]
+                previous_name, previous_index = name, index
+            if {item["account"] for item in raw_items} != endpoints:
+                return False
+
+            balances = dict(old_balances)
+            for transfer in normalized:
+                source, target, amount = (transfer["source"], transfer["target"],
+                                          transfer["amount"])
+                if balances[source] < amount:
+                    return False
+                balances[source] -= amount
+                balances[target] += amount
+
+            nodes: dict[tuple[int, int], bytes] = {}
+            previous_position: tuple[int, int] | None = None
+            for node in raw_nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, index = node["level"], node["index"]
+                if not _is_int(level) or not _is_int(index) or level < 0 or index < 0:
+                    return False
+                position = (level, index)
+                if previous_position is not None and not previous_position < position:
+                    return False
+                if not _is_hex64(node["hash"]):
+                    return False
+                nodes[position] = bytes.fromhex(node["hash"])
+                previous_position = position
+
+            old_root = merkle_verify_multiproof(old_leaves, nodes, size)
+            if old_root is None or old_root.hex() != root:
+                return False
+            new_leaves = dict(old_leaves)
+            for item in raw_items:
+                name = item["account"]
+                new_leaves[item["index"]] = _leaf(name, balances[name])
+            rebuilt = merkle_verify_multiproof(new_leaves, nodes, size)
+            return rebuilt is not None and rebuilt.hex() == new_root
+        except (KeyError, TypeError, ValueError):
+            return False
 
     def version(self) -> int:
         """Current version number; 0 for an untouched state."""
