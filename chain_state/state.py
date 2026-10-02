@@ -894,3 +894,193 @@ class State:
             return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
+
+    def prove_lookup(self, accounts: object) -> dict:
+        """Compact existence/absence lookup proof for a non-empty set of accounts.
+
+        ``accounts`` must be an array of unique non-empty strings (order is free);
+        malformed structure, wrong types or duplicate names raise ``ValueError``.
+        Unknown accounts are a normal result rather than an error. The proof carries
+        the state root, the full tree ``size``, one ``result`` per queried account in
+        ascending name order, and the same compact ``items``/``nodes`` layout as
+        :meth:`prove_many`: items cover the de-duplicated union of the existing
+        queries and the predecessor/successor boundaries the absent queries need,
+        and one shared multi-proof connects every item to the root. An existing
+        account (zero balance included) yields its full-sorted index with null
+        ``prev``/``next``; an absent one yields null ``index`` and the immediate
+        neighbour indices (null past either end). An empty state yields the
+        empty-tree root, size 0 and no items or nodes. Generation never mutates
+        accounts, versions, the root or snapshots.
+        """
+        normalized = _validate_account_set(accounts)
+        document = self._read()
+        state_accounts = document["accounts"]
+        names = sorted(state_accounts)
+        size = len(names)
+        leaves = [_leaf(n, int(state_accounts[n])) for n in names]
+        results: list[dict] = []
+        needed: set[int] = set()
+        for account in sorted(normalized):
+            position = bisect.bisect_left(names, account)
+            if position < size and names[position] == account:
+                results.append({"account": account, "index": position,
+                                "prev": None, "next": None})
+                needed.add(position)
+            else:
+                prev_index = position - 1 if position > 0 else None
+                next_index = position if position < size else None
+                results.append({"account": account, "index": None,
+                                "prev": prev_index, "next": next_index})
+                if prev_index is not None:
+                    needed.add(prev_index)
+                if next_index is not None:
+                    needed.add(next_index)
+        chosen = sorted(needed)
+        items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
+                  "index": index} for index in chosen]
+        nodes = [{"level": level, "index": index, "hash": hash_value}
+                 for level, index, hash_value in merkle_multiproof(leaves, chosen)]
+        return {"root": _root_for(state_accounts), "size": size,
+                "results": results, "items": items, "nodes": nodes}
+
+    def verify_lookup(self, accounts: object, expected_root: object, proof: object) -> bool:
+        """Verify a compact existence/absence lookup proof using the proof alone.
+
+        Only a proof isomorphic to one :meth:`prove_lookup` emits is accepted: a JSON
+        object with exactly ``root``, ``size``, ``results``, ``items`` and ``nodes``.
+        The query ``accounts`` must be a non-empty array of unique non-empty strings
+        and ``results`` must answer them in strictly ascending name order. An
+        existing result carries a non-null in-range index with null neighbours and a
+        same-name, same-index inclusion item; an absent result carries a null index
+        and adjacent predecessor/successor indices (null past the ends, with the
+        same strict-bracketing and adjacency rules as :meth:`verify_absence`), each
+        backed by an inclusion item. ``items`` must equal exactly the de-duplicated
+        union of existing accounts and referenced boundaries -- no missing or
+        unrelated entries -- and ``nodes`` must be the minimal shared multi-proof
+        that recomputes a root equal to both ``proof.root`` and ``expected_root``.
+        Size 0 is anchored solely by the empty-tree root with every result null.
+        Type confusion (including booleans posing as integers), missing or extra
+        fields, or any other inconsistency return False; the state directory is
+        never read.
+        """
+        try:
+            normalized = _validate_account_set(accounts)
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {
+                "root", "size", "results", "items", "nodes"
+            }:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root) or root != expected_root:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size < 0:
+                return False
+            raw_results = proof["results"]
+            raw_items = proof["items"]
+            raw_nodes = proof["nodes"]
+            if (not isinstance(raw_results, list) or not isinstance(raw_items, list)
+                    or not isinstance(raw_nodes, list)):
+                return False
+            if len(raw_results) != len(normalized):
+                return False
+
+            if size == 0:
+                if raw_items or raw_nodes or root != merkle_root([]).hex():
+                    return False
+                for result, account in zip(raw_results, sorted(normalized)):
+                    if (not isinstance(result, dict)
+                            or set(result) != {"account", "index", "prev", "next"}
+                            or result["account"] != account
+                            or result["index"] is not None
+                            or result["prev"] is not None
+                            or result["next"] is not None):
+                        return False
+                return True
+
+            # Validate results and collect the item indices each result requires.
+            required: set[int] = set()
+            specs: list[tuple[str, int, int]] = []
+            for result, account in zip(raw_results, sorted(normalized)):
+                if (not isinstance(result, dict)
+                        or set(result) != {"account", "index", "prev", "next"}
+                        or result["account"] != account):
+                    return False
+                index, previous, following = result["index"], result["prev"], result["next"]
+                if index is not None:
+                    if (not _is_int(index) or not 0 <= index < size
+                            or previous is not None or following is not None):
+                        return False
+                    required.add(index)
+                    specs.append((account, index, index))
+                    continue
+                if previous is not None and (not _is_int(previous) or not 0 <= previous < size):
+                    return False
+                if following is not None and (not _is_int(following) or not 0 <= following < size):
+                    return False
+                prev_index = -1 if previous is None else previous
+                next_index = size if following is None else following
+                if next_index != prev_index + 1:
+                    return False
+                if previous is not None:
+                    required.add(previous)
+                if following is not None:
+                    required.add(following)
+                specs.append((account, prev_index, next_index))
+
+            # Validate inclusion items and index them by leaf position.
+            leaves: dict[int, bytes] = {}
+            item_names: dict[int, str] = {}
+            previous_name: str | None = None
+            previous_index = -1
+            for item in raw_items:
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index"}:
+                    return False
+                name = item["account"]
+                index = item["index"]
+                if not isinstance(name, str) or not name:
+                    return False
+                if previous_name is not None and not previous_name < name:
+                    return False
+                if not _is_int(item["balance"]) or item["balance"] < 0:
+                    return False
+                if not _is_int(index) or not previous_index < index < size:
+                    return False
+                leaves[index] = _leaf(name, item["balance"])
+                item_names[index] = name
+                previous_name, previous_index = name, index
+            if set(item_names) != required:
+                return False
+
+            # Existing results need a same-name item; absent ones need strict bracketing.
+            for account, prev_index, next_index in specs:
+                if prev_index == next_index:
+                    if item_names[prev_index] != account:
+                        return False
+                else:
+                    if prev_index >= 0 and not item_names[prev_index] < account:
+                        return False
+                    if next_index < size and not item_names[next_index] > account:
+                        return False
+
+            nodes: dict[tuple[int, int], bytes] = {}
+            previous_position: tuple[int, int] | None = None
+            for node in raw_nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, index = node["level"], node["index"]
+                if not _is_int(level) or not _is_int(index) or level < 0 or index < 0:
+                    return False
+                position = (level, index)
+                if previous_position is not None and not previous_position < position:
+                    return False
+                if not _is_hex64(node["hash"]):
+                    return False
+                nodes[position] = bytes.fromhex(node["hash"])
+                previous_position = position
+
+            recomputed = merkle_verify_multiproof(leaves, nodes, size)
+            return recomputed is not None and recomputed.hex() == root
+        except (KeyError, TypeError, ValueError):
+            return False
