@@ -53,6 +53,8 @@ def _parser() -> argparse.ArgumentParser:
     transfer.add_argument("source")
     transfer.add_argument("target")
     transfer.add_argument("amount", type=_positive_int)
+    transfer_many = sub.add_parser("transfer-many", help="atomically settle a batch of transfers between existing accounts")
+    transfer_many.add_argument("transfers", help="transfers JSON array, or - to read it from stdin")
     read = sub.add_parser("get", help="read an account balance")
     read.add_argument("account")
     sub.add_parser("root", help="print the state root")
@@ -82,6 +84,8 @@ def _parser() -> argparse.ArgumentParser:
     prove_page.add_argument("limit", type=_positive_int)
     prove_update = sub.add_parser("prove-update", help="print a read-only balance-update preview proof as JSON")
     prove_update.add_argument("updates", help="updates JSON object, or - to read it from stdin")
+    prove_transfers = sub.add_parser("prove-transfers", help="print a read-only batch-transfer preview proof as JSON")
+    prove_transfers.add_argument("transfers", help="transfers JSON array, or - to read it from stdin")
     verify = sub.add_parser("verify", help="verify an inclusion proof")
     verify.add_argument("account")
     verify.add_argument("balance", type=int)
@@ -117,6 +121,10 @@ def _parser() -> argparse.ArgumentParser:
     verify_update.add_argument("updates", help="updates JSON object (inline only)")
     verify_update.add_argument("expected_root")
     verify_update.add_argument("proof", help="proof JSON, or - to read it from stdin")
+    verify_transfers = sub.add_parser("verify-transfers", help="verify a batch-transfer preview proof")
+    verify_transfers.add_argument("transfers", help="transfers JSON array (inline only)")
+    verify_transfers.add_argument("expected_root")
+    verify_transfers.add_argument("proof", help="proof JSON, or - to read it from stdin")
     sub.add_parser("report", help="print this domain's report as JSON")
     return parser
 
@@ -137,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
             print(state.apply(json.loads(raw)))
         elif args.command == "transfer":
             print(state.transfer(args.source, args.target, args.amount))
+        elif args.command == "transfer-many":
+            raw = sys.stdin.read() if args.transfers == "-" else args.transfers
+            print(state.transfer_many(json.loads(raw)))
         elif args.command == "get":
             print(state.get(args.account))
         elif args.command == "root":
@@ -168,6 +179,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "prove-update":
             raw = sys.stdin.read() if args.updates == "-" else args.updates
             print(json.dumps(state.prove_update(json.loads(raw)), sort_keys=True))
+        elif args.command == "prove-transfers":
+            raw = sys.stdin.read() if args.transfers == "-" else args.transfers
+            print(json.dumps(state.prove_transfers(json.loads(raw)), sort_keys=True))
         elif args.command == "verify":
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             ok = state.verify(args.account, args.balance, json.loads(raw))
@@ -214,6 +228,12 @@ def main(argv: list[str] | None = None) -> int:
             raw = sys.stdin.read() if args.proof == "-" else args.proof
             updates = json.loads(args.updates)
             ok = state.verify_update(updates, args.expected_root, json.loads(raw))
+            print("valid" if ok else "invalid")
+            return 0 if ok else 1
+        elif args.command == "verify-transfers":
+            raw = sys.stdin.read() if args.proof == "-" else args.proof
+            transfers = json.loads(args.transfers)
+            ok = state.verify_transfers(transfers, args.expected_root, json.loads(raw))
             print("valid" if ok else "invalid")
             return 0 if ok else 1
         elif args.command == "report":
