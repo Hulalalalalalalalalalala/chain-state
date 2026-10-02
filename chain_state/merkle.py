@@ -9,7 +9,8 @@ from __future__ import annotations
 import hashlib
 from typing import Iterable, Sequence
 
-__all__ = ["leaf_hash", "node_hash", "merkle_root", "merkle_proof", "verify_proof"]
+__all__ = ["leaf_hash", "node_hash", "merkle_root", "merkle_proof", "verify_proof",
+           "merkle_multiproof", "merkle_verify_multiproof"]
 
 
 def leaf_hash(data: bytes) -> bytes:
@@ -59,3 +60,79 @@ def verify_proof(leaf: bytes, index: int, path: Iterable[dict[str, str]], root: 
         sibling = bytes.fromhex(step["hash"])
         current = node_hash(current, sibling) if step["side"] == "right" else node_hash(sibling, current)
     return current.hex() == root
+
+
+def merkle_multiproof(leaves: Sequence[bytes], indices: Iterable[int]) -> list[tuple[int, int, str]]:
+    """Compact set of sibling nodes connecting the leaves at ``indices`` to the root.
+
+    Returns ``(level, index, hash_hex)`` triples for every real sibling node needed to
+    connect the chosen leaves to the root, sorted by level then index. A node is emitted
+    only when it is neither a chosen leaf nor reconstructable from lower levels; the
+    duplicated tail of an odd level is never emitted, since the verifier reproduces it
+    from the last real node. Choosing every leaf yields an empty list.
+    """
+    levels = _levels(leaves)
+    chosen = set(indices)
+    if not all(0 <= position < len(leaves) for position in chosen):
+        raise ValueError("leaf index out of range")
+    nodes: list[tuple[int, int, str]] = []
+    seen: set[tuple[int, int]] = set()
+    for level_index, level in enumerate(levels[:-1]):
+        width = len(level)
+        for position in sorted(chosen):
+            sibling = position ^ 1
+            if sibling in chosen:
+                continue
+            if width % 2 and sibling == width:
+                continue  # duplicated tail node, reproduced from the last real node
+            key = (level_index, sibling)
+            if key not in seen:
+                seen.add(key)
+                nodes.append((level_index, sibling, level[sibling].hex()))
+        chosen = {position // 2 for position in chosen}
+    nodes.sort()
+    return nodes
+
+
+def merkle_verify_multiproof(
+    leaves: dict[int, bytes], nodes: dict[tuple[int, int], bytes], size: int
+) -> bytes | None:
+    """Recompute the root from chosen leaves and a compact sibling-node set.
+
+    ``leaves`` maps a leaf position to its hash; ``nodes`` maps ``(level, index)`` to a
+    real sibling hash. Returns the root bytes, or None when a node sits outside the
+    tree shape implied by ``size``, a needed sibling is missing, or a supplied node is
+    never consumed (duplicate or reconstructable from lower levels).
+    """
+    widths = [size]
+    while widths[-1] > 1:
+        widths.append((widths[-1] + 1) // 2)
+    depth = len(widths) - 1
+    for level, index in nodes:
+        if not 0 <= level < depth or not 0 <= index < widths[level]:
+            return None
+    current = dict(leaves)
+    used: set[tuple[int, int]] = set()
+    for level in range(depth):
+        width = widths[level]
+        parents: dict[int, bytes] = {}
+        for position, node in current.items():
+            sibling = position ^ 1
+            if sibling in current:
+                sibling_hash = current[sibling]
+            elif width % 2 and sibling == width:
+                sibling_hash = current[width - 1]  # the duplicated tail is its own sibling
+            else:
+                key = (level, sibling)
+                if key not in nodes:
+                    return None
+                sibling_hash = nodes[key]
+                used.add(key)
+            if position % 2 == 0:
+                parents[position // 2] = node_hash(node, sibling_hash)
+            else:
+                parents[position // 2] = node_hash(sibling_hash, node)
+        current = parents
+    if used != set(nodes) or set(current) != {0}:
+        return None
+    return current[0]

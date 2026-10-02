@@ -12,7 +12,8 @@ import json
 import re
 from pathlib import Path
 
-from .merkle import leaf_hash, merkle_proof, merkle_root, node_hash
+from .merkle import (leaf_hash, merkle_multiproof, merkle_proof, merkle_root,
+                     merkle_verify_multiproof, node_hash)
 
 __all__ = ["State"]
 
@@ -106,6 +107,26 @@ def _recompute_root(leaf: bytes, index: int, path: list[dict], root: str) -> boo
         sibling = bytes.fromhex(step["hash"])
         current = node_hash(current, sibling) if step["side"] == "right" else node_hash(sibling, current)
     return current.hex() == root
+
+
+def _validate_account_set(accounts: object) -> list[str]:
+    """Validate a query set: a non-empty JSON array of unique non-empty strings.
+
+    Returns the names in their given order; malformed structure, wrong element types,
+    empty names or duplicates raise ``ValueError``.
+    """
+    if not isinstance(accounts, list) or not accounts:
+        raise ValueError("accounts must be a non-empty array")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for account in accounts:
+        if not isinstance(account, str) or not account:
+            raise ValueError("accounts must be non-empty strings")
+        if account in seen:
+            raise ValueError(f"duplicate account {account!r}")
+        seen.add(account)
+        normalized.append(account)
+    return normalized
 
 
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
@@ -766,5 +787,110 @@ class State:
                 if not _check_boundary(following, next_index, "next", account, root, size):
                     return False
             return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def prove_many(self, accounts: object) -> dict:
+        """Compact inclusion proof for an arbitrary non-empty set of accounts.
+
+        ``accounts`` must be an array of unique non-empty strings (order is free).
+        Malformed structure, wrong types or duplicate names raise ``ValueError``; an
+        unknown account raises ``KeyError``. The proof carries the state root, the
+        full tree size, one item per account sorted by name (with its full-sorted
+        index), and exactly the real sibling nodes needed to connect the items to the
+        root -- never nodes reconstructable from the chosen accounts or lower levels,
+        and never the duplicated tail of an odd level. Proving every account yields an
+        empty node set. Reading the state never mutates it, so zero-balance accounts
+        are provable and accounts, version and snapshots are left untouched.
+        """
+        normalized = _validate_account_set(accounts)
+        document = self._read()
+        state_accounts = document["accounts"]
+        for account in normalized:
+            if account not in state_accounts:
+                raise KeyError(f"unknown account {account!r}")
+        names = sorted(state_accounts)
+        chosen = sorted(names.index(account) for account in normalized)
+        leaves = [_leaf(n, int(state_accounts[n])) for n in names]
+        items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
+                  "index": index} for index in chosen]
+        nodes = [{"level": level, "index": index, "hash": hash_value}
+                 for level, index, hash_value in merkle_multiproof(leaves, chosen)]
+        return {"root": _root_for(state_accounts), "size": len(names),
+                "items": items, "nodes": nodes}
+
+    def verify_many(self, accounts: object, expected_root: object, proof: object) -> bool:
+        """Verify a compact multi-account inclusion proof using the proof alone.
+
+        Only a proof isomorphic to one :meth:`prove_many` emits is accepted: a JSON
+        object with exactly ``root``, ``size``, ``items`` and ``nodes``. The query
+        ``accounts`` must be a non-empty array of unique non-empty strings equal as a
+        set to the proven accounts; ``expected_root`` must equal the proof root. Items
+        must be strictly ascending by name and by in-range index with non-negative
+        integer balances, and nodes must be strictly ascending ``(level, index)``
+        positions carrying 64 lowercase hex hashes. Every node must be a valid
+        position, be consumed exactly once while recomputing the root and leave no
+        surplus; duplicate or reconstructable nodes, out-of-range positions, a query
+        mismatch or any root discrepancy return False. The state directory is never
+        read.
+        """
+        try:
+            normalized = _validate_account_set(accounts)
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {"root", "size", "items", "nodes"}:
+                return False
+            root = proof["root"]
+            if not _is_hex64(root) or root != expected_root:
+                return False
+            size = proof["size"]
+            if not _is_int(size) or size <= 0:
+                return False
+            raw_items = proof["items"]
+            raw_nodes = proof["nodes"]
+            if not isinstance(raw_items, list) or not isinstance(raw_nodes, list):
+                return False
+            if len(raw_items) != len(normalized):
+                return False
+
+            leaves: dict[int, bytes] = {}
+            previous_name: str | None = None
+            previous_index = -1
+            for item in raw_items:
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index"}:
+                    return False
+                name = item["account"]
+                index = item["index"]
+                if not isinstance(name, str) or not name:
+                    return False
+                if previous_name is not None and not previous_name < name:
+                    return False
+                if not _is_int(item["balance"]) or item["balance"] < 0:
+                    return False
+                if not _is_int(index) or not previous_index < index < size:
+                    return False
+                leaves[index] = _leaf(name, item["balance"])
+                previous_name, previous_index = name, index
+            if {item["account"] for item in raw_items} != set(normalized):
+                return False
+
+            nodes: dict[tuple[int, int], bytes] = {}
+            previous_position: tuple[int, int] | None = None
+            for node in raw_nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, index = node["level"], node["index"]
+                if not _is_int(level) or not _is_int(index) or level < 0 or index < 0:
+                    return False
+                position = (level, index)
+                if previous_position is not None and not previous_position < position:
+                    return False
+                if not _is_hex64(node["hash"]):
+                    return False
+                nodes[position] = bytes.fromhex(node["hash"])
+                previous_position = position
+
+            recomputed = merkle_verify_multiproof(leaves, nodes, size)
+            return recomputed is not None and recomputed.hex() == root
         except (KeyError, TypeError, ValueError):
             return False
