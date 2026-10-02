@@ -129,6 +129,24 @@ def _validate_account_set(accounts: object) -> list[str]:
     return normalized
 
 
+def _validate_updates(updates: object) -> dict[str, int]:
+    """Validate a balance-update object: a non-empty object of non-empty names to non-negative ints.
+
+    Booleans are not integers. Returns an independent normalized dict; malformed
+    structure or types raise ``ValueError``.
+    """
+    if not isinstance(updates, dict) or not updates:
+        raise ValueError("updates must be a non-empty object")
+    normalized: dict[str, int] = {}
+    for account, balance in updates.items():
+        if not isinstance(account, str) or not account:
+            raise ValueError("account must be a non-empty string")
+        if not _is_int(balance) or balance < 0:
+            raise ValueError("balance must be a non-negative integer")
+        normalized[account] = balance
+    return normalized
+
+
 def _check_boundary(boundary: dict, index: int, relation: str, account: str, root: str, size: int) -> bool:
     """Validate one absence-proof boundary: a genuine inclusion proof strictly bracketing account."""
     name = boundary["account"]
@@ -1275,5 +1293,128 @@ class State:
 
             recomputed = merkle_verify_multiproof(leaves, nodes, size)
             return recomputed is not None and recomputed.hex() == root
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def prove_update(self, updates: object) -> dict:
+        """Read-only preview proof for replacing balances without writing.
+
+        ``updates`` is a non-empty JSON object mapping non-empty account names to
+        non-negative JSON integers (booleans are not integers). Every named account
+        must already exist -- a zero-balance account counts -- or ``KeyError`` is
+        raised; malformed structure or types raise ``ValueError`` before the state is
+        read, and an uninitialised state raises ``FileNotFoundError``. The proof
+        carries the current ``root``, ``new_root`` (the root after replacing only the
+        named balances), the total ``size``, one ``items`` entry per updated account
+        holding its *old* balance in the same compact layout as :meth:`prove_many`,
+        and the minimal ``nodes`` shared by both trees. Updating every account yields
+        empty ``nodes``; when every new balance equals the old one the two roots are
+        equal. Nothing is persisted and the input object is never modified.
+        """
+        normalized = _validate_updates(updates)
+        document = self._read()
+        state_accounts = document["accounts"]
+        for account in normalized:
+            if account not in state_accounts:
+                raise KeyError(f"unknown account {account!r}")
+        names = sorted(state_accounts)
+        chosen = sorted(names.index(account) for account in normalized)
+        leaves = [_leaf(n, int(state_accounts[n])) for n in names]
+        items = [{"account": names[index], "balance": int(state_accounts[names[index]]),
+                  "index": index} for index in chosen]
+        root = merkle_root(leaves).hex()
+        new_leaves = list(leaves)
+        for account, balance in normalized.items():
+            new_leaves[names.index(account)] = _leaf(account, balance)
+        new_root = merkle_root(new_leaves).hex()
+        nodes = [{"level": level, "index": index, "hash": hash_value}
+                 for level, index, hash_value in merkle_multiproof(leaves, chosen)]
+        return {"root": root, "new_root": new_root, "size": len(names),
+                "items": items, "nodes": nodes}
+
+    def verify_update(self, updates: object, expected_root: object, proof: object) -> bool:
+        """Verify a balance-update preview proof using the proof alone; no state is read.
+
+        Only a proof isomorphic to one :meth:`prove_update` emits is accepted: a JSON
+        object with exactly ``root``, ``new_root``, ``size``, ``items`` and
+        ``nodes``. The ``updates`` object must be valid and equal as a set to the
+        proven accounts, and ``root`` must equal the trusted ``expected_root``.
+        Items carry the strictly ascending old-balance entries in the same compact
+        layout as :meth:`verify_many`; the minimal nodes must recompute ``root`` from
+        the old leaves and ``new_root`` from the same leaves with the named balances
+        replaced, consuming every node exactly once in each recomputation. The
+        supplied nodes anchor the new tree because each needed sibling subtree
+        contains none of the updated accounts, so its hash is unchanged. Invalid
+        arguments, missing or extra fields, a set mismatch, type confusion
+        (including booleans), out-of-order entries, out-of-range indices, missing,
+        duplicate or surplus nodes, or either root being wrong returns False.
+        """
+        try:
+            normalized = _validate_updates(updates)
+            if not _is_hex64(expected_root):
+                return False
+            if not isinstance(proof, dict) or set(proof) != {
+                "root", "new_root", "size", "items", "nodes"
+            }:
+                return False
+            root = proof["root"]
+            new_root = proof["new_root"]
+            if not _is_hex64(root) or root != expected_root or not _is_hex64(new_root):
+                return False
+            size = proof["size"]
+            raw_items = proof["items"]
+            raw_nodes = proof["nodes"]
+            if (not _is_int(size) or size <= 0 or not isinstance(raw_items, list)
+                    or not isinstance(raw_nodes, list)):
+                return False
+            if len(raw_items) != len(normalized):
+                return False
+
+            old_leaves: dict[int, bytes] = {}
+            previous_name: str | None = None
+            previous_index = -1
+            for item in raw_items:
+                if not isinstance(item, dict) or set(item) != {"account", "balance", "index"}:
+                    return False
+                name = item["account"]
+                index = item["index"]
+                if not isinstance(name, str) or not name:
+                    return False
+                if previous_name is not None and not previous_name < name:
+                    return False
+                if not _is_int(item["balance"]) or item["balance"] < 0:
+                    return False
+                if not _is_int(index) or not previous_index < index < size:
+                    return False
+                old_leaves[index] = _leaf(name, item["balance"])
+                previous_name, previous_index = name, index
+            if {item["account"] for item in raw_items} != set(normalized):
+                return False
+
+            nodes: dict[tuple[int, int], bytes] = {}
+            previous_position: tuple[int, int] | None = None
+            for node in raw_nodes:
+                if not isinstance(node, dict) or set(node) != {"level", "index", "hash"}:
+                    return False
+                level, index = node["level"], node["index"]
+                if not _is_int(level) or not _is_int(index) or level < 0 or index < 0:
+                    return False
+                position = (level, index)
+                if previous_position is not None and not previous_position < position:
+                    return False
+                if not _is_hex64(node["hash"]):
+                    return False
+                nodes[position] = bytes.fromhex(node["hash"])
+                previous_position = position
+
+            old_root = merkle_verify_multiproof(old_leaves, nodes, size)
+            if old_root is None or old_root.hex() != root:
+                return False
+            new_leaves = dict(old_leaves)
+            for item in raw_items:
+                new_leaves[item["index"]] = _leaf(item["account"],
+                                                  normalized[item["account"]])
+            rebuilt = merkle_verify_multiproof(new_leaves, nodes, size)
+            return rebuilt is not None and rebuilt.hex() == new_root
         except (KeyError, TypeError, ValueError):
             return False
