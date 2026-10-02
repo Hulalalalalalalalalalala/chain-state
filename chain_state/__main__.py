@@ -61,6 +61,10 @@ def _parser() -> argparse.ArgumentParser:
     transfer_many_once.add_argument("request_id", help="non-empty request identifier")
     transfer_many_once.add_argument("expected_root", help="required current root (64 lowercase hex characters)")
     transfer_many_once.add_argument("transfers", help="transfers JSON array, or - to read it from stdin")
+    transfer_receipt = sub.add_parser(
+        "transfer-receipt",
+        help="print the historical settlement receipt of an idempotent transfer request")
+    transfer_receipt.add_argument("request_id", help="non-empty request identifier")
     read = sub.add_parser("get", help="read an account balance")
     read.add_argument("account")
     sub.add_parser("root", help="print the state root")
@@ -158,6 +162,9 @@ def main(argv: list[str] | None = None) -> int:
             raw = sys.stdin.read() if args.transfers == "-" else args.transfers
             print(state.transfer_many_once(args.request_id, args.expected_root,
                                            json.loads(raw)))
+        elif args.command == "transfer-receipt":
+            receipt = state.transfer_receipt(args.request_id)
+            print("null" if receipt is None else json.dumps(receipt, sort_keys=True))
         elif args.command == "get":
             print(state.get(args.account))
         elif args.command == "root":

@@ -25,6 +25,7 @@ python3 -m chain_state --root ./state transfer-many '[{"source":"alice","target"
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state transfer-many -
 python3 -m chain_state --root ./state transfer-many-once req-1 <old-root> '[{"source":"alice","target":"bob","amount":10}]'
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state transfer-many-once req-1 <old-root> -
+python3 -m chain_state --root ./state transfer-receipt req-1
 python3 -m chain_state --root ./state prove-transfers '[{"source":"alice","target":"bob","amount":10}]'
 echo '[{"source":"alice","target":"bob","amount":10}]' | python3 -m chain_state --root ./state prove-transfers -
 python3 -m chain_state --root ./state verify-transfers '[{"source":"alice","target":"bob","amount":10}]' <root> <proof>
@@ -54,7 +55,7 @@ python3 -m chain_state --root ./state snapshots
 
 `--root` 指向状态目录，不存在时由 `init` 创建。
 
-子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
+子命令：`init`、`set <account> <balance>`、`get <account>`、`root`、`prove <account>`、`verify <account> <balance> <proof>`、`delete <account>`、`apply <transaction>`、`transfer <source> <target> <amount>`、`transfer-many <transfers>`、`transfer-many-once <request-id> <expected-root> <transfers>`、`transfer-receipt <request-id>`、`prove-absence <account>`、`verify-absence <account> <proof>`、`prove-prefix <count>`、`verify-prefix <count> <proof>`、`prove-range <start> <end>`、`verify-range <start> <end> <proof>`、`prove-name-range <start> <end>`、`verify-name-range <start> <end> <proof>`、`prove-many <accounts>`、`verify-many <accounts> <expected-root> <proof>`、`prove-lookup <accounts>`、`verify-lookup <accounts> <expected-root> <proof>`、`prove-page <start> <limit>`、`verify-page <start> <limit> <expected-root> <proof>`、`prove-update <updates>`、`verify-update <updates> <expected-root> <proof>`、`prove-transfers <transfers>`、`verify-transfers <transfers> <expected-root> <proof>`、`snapshot <label>`、`restore <label>`、`snapshots`、`report`。
 
 `apply` 的位置参数为内联交易 JSON，值为 `-` 时从 stdin 读取。交易只许含 `set` 对象与 `delete` 数组（两字段省略或为空即空批次），成功只输出版本号；非法交易以 2 退出，未 init 以 1 退出。
 
@@ -70,6 +71,10 @@ python3 -m chain_state --root ./state snapshots
 
 `transfer-many-once` 依次接收非空请求标识、旧根（64 个小写十六进制字符）与批次 JSON（`-` 从 stdin 读取，批次规则同 `transfer-many`）。首次提交要求当前根等于旧根，随后检查全部端点再按序结算；成功只增加一次版本并只输出版本号（即使最终余额不变也增加），以 0 退出。相同标识、旧根与批次再次提交时直接返回首次成功版本，不结算、不写入，即使期间账户改变或恢复快照也是如此；批次比较保留数组顺序与重复项、忽略对象键顺序。同一标识对应其他旧根或批次、新标识遇当前根不符均属冲突，以 1 退出；未 init 或写入失败也以 1 退出；非法参数、非法根格式、JSON 语法错误、未知端点或余额不足以 2 退出。失败时 stdout 为空、诊断写 stderr，且账户、根、版本、快照与成功记录均不变。
 
+首次成功提交还会原子保存一份历史结算**回执**（与账户、版本、成功记录同一次写入），回执只含 `request_id`、`version`、`transfers`、`proof`：标识、版本与批次对应首次成功记录（批次保留顺序与重复项），`proof` 与提交前 `prove-transfers` 的结果按 JSON 内容相等，其 `new_root` 等于该次结算后的状态根。可用回执中的批次、证明与记录的可信旧根调用既有 `verify-transfers` 验证；后续账户变化或恢复快照不影响历史证明。重复提交不补写回执，既有写入口与恢复快照保留回执，快照内容不扩展，`init` 清空回执。
+
+`transfer-receipt` 沿用 `--root`，接收一个非空请求标识：有回执时输出回执 JSON，旧成功记录未保存回执时输出 `null`，均以 0 退出；未 init 或文件读取错误以 1 退出；非法标识、未知请求、回执损坏（字段或类型非法、与成功记录的标识/版本/批次不符、证明无法以记录的旧根验证）或缺少参数以 2 退出。失败时 stdout 为空、诊断写 stderr；查询为只读，不写入、不增加版本。
+
 ## 公开接口
 
 `chain_state.State(root)`：
@@ -81,7 +86,8 @@ python3 -m chain_state --root ./state snapshots
 - `apply(transaction) -> int` 原子提交一笔交易：`set` 对象写入账户新余额、`delete` 数组删除账户，整批只增加一个版本；两字段省略或为空即空批次，返回当前版本且不写入。校验全部先于写入：结构或类型错误抛出 `ValueError`，删除不存在账户抛出 `KeyError`，失败后无可见变化。
 - `transfer(source, target, amount) -> int` 原子转账：`source`、`target` 为不同的非空字符串，`amount` 为正的 JSON 整数（布尔不算整数）；source 已存在且余额充足，target 不存在则创建、已存在则在原余额上增加。成功时源账户减少 amount（变为 0 也保留账户记录），目标账户增加 amount，整次操作只增加一个版本并返回。所有校验与余额检查先于写入：参数或类型错误抛出 `ValueError`，source 不存在抛出 `KeyError`，余额不足抛出 `ValueError`，失败后账户、版本与状态根均不变。
 - `transfer_many(transfers) -> int` 已有账户间的原子批量转账：`transfers` 为非空数组，每项对象恰含 `source`、`target`、`amount`，前两者为不同的非空字符串，金额为正的 JSON 整数（布尔不算整数），允许重复转账与重复账户。整批结构先校验，再读取状态并确认全部端点均已存在（零余额账户也算存在），随后按序结算——前一笔入账可供后一笔转出。结构或类型非法、余额不足抛出 `ValueError`，未知端点抛出 `KeyError`，结构合法但未初始化抛出 `FileNotFoundError`。成功只增加一个版本并返回新版本，余额被转空的账户保留，最终余额全部恢复原值也增加版本；失败后账户、版本、状态根与快照均不变。
-- `transfer_many_once(request_id, expected_root, transfers) -> int` 带旧根约束、可重复提交的批量转账：`request_id` 为非空字符串，`expected_root` 为 64 个小写十六进制字符，批次规则与按序结算语义同 `transfer_many`。三个参数全部先校验再读状态：结构、类型或根格式非法抛 `ValueError`，合法但未初始化抛 `FileNotFoundError`。读取后先处理重复请求：相同标识、旧根与批次返回首次成功版本（不结算、不写入，即使期间账户改变或恢复快照也如此；批次比较保留数组顺序与重复项、忽略对象键顺序），同一标识对应其他旧根或批次抛 `RuntimeError`；新标识随后检查旧根——当前根不符抛 `RuntimeError`（根约束与版本无关）——再检查全部端点（未知端点抛 `KeyError`），最后按序结算（余额不足抛 `ValueError`）。首次成功只增加一个版本（即使最终余额不变也增加）并把请求与版本、旧根、批次一同持久化；结算后的根等于同一旧状态下 `prove_transfers` 的 `new_root`。失败不占用标识，调用不修改输入，账户、根、版本、快照与记录均不变；写入失败抛 `OSError` 且原状态文件保留。
+- `transfer_many_once(request_id, expected_root, transfers) -> int` 带旧根约束、可重复提交的批量转账：`request_id` 为非空字符串，`expected_root` 为 64 个小写十六进制字符，批次规则与按序结算语义同 `transfer_many`。三个参数全部先校验再读状态：结构、类型或根格式非法抛 `ValueError`，合法但未初始化抛 `FileNotFoundError`。读取后先处理重复请求：相同标识、旧根与批次返回首次成功版本（不结算、不写入，即使期间账户改变或恢复快照也如此；批次比较保留数组顺序与重复项、忽略对象键顺序），同一标识对应其他旧根或批次抛 `RuntimeError`；新标识随后检查旧根——当前根不符抛 `RuntimeError`（根约束与版本无关）——再检查全部端点（未知端点抛 `KeyError`），最后按序结算（余额不足抛 `ValueError`）。首次成功只增加一个版本（即使最终余额不变也增加）并把请求与版本、旧根、批次一同持久化；同一原子写入还保存结算回执（见 `transfer_receipt`），其证明与同一旧状态下 `prove_transfers` 的结果按 JSON 内容相等，`new_root` 为结算后的状态根。失败不占用标识，调用不修改输入，账户、根、版本、快照、记录与回执均不变；写入失败抛 `OSError` 且原状态文件保留。
+- `transfer_receipt(request_id) -> dict | None` 查询历史结算回执：`request_id` 为非空字符串（否则抛 `ValueError`），合法标识遇未初始化目录抛 `FileNotFoundError`，未知标识抛 `KeyError`。返回的独立深层副本只含 `request_id`、`version`、`transfers`、`proof`——标识、版本、批次对应首次成功记录（批次保留顺序与重复项），`proof` 为提交时保存的预览证明，可与批次、记录的可信旧根一起交给 `verify_transfers` 验证，后续账户变化或恢复快照不影响其有效性。旧成功记录未保存回执时返回 `None`，查询与重复提交均不补写。已保存回执的字段或类型非法、标识版本批次与成功记录不符、或证明无法以记录的旧根验证时统一抛 `ValueError`，不会被当作无回执。查询只读：不写入文件、不增加版本。
 - `version() -> int` 当前版本号。
 - `state_root() -> str` 当前全部账户的状态根（十六进制）。
 - `prove(account) -> dict` 该账户的包含证明。
@@ -112,7 +118,9 @@ python3 -m chain_state --root ./state snapshots
 
 快照随 `state.json` 持久化在 `snapshots` 字段中；没有该字段的旧状态文件按空集合兼容读取，状态根仍只由账户与余额决定。
 
-成功的 once 请求记录随 `state.json` 持久化在 `requests` 字段中（每条含首次成功的 `version`、约束的旧 `root` 与归一化 `transfers`），重开目录仍能识别；没有该字段的旧状态文件按空集合兼容读取。记录不参与状态根，也不随快照保存或恢复——快照仍只含 `accounts`、`version`、`root`；既有写入口保留记录，`init` 清空记录并保留其重置语义。写入为同目录临时文件落盘后原子改名，写入失败时原状态文件保留。
+成功的 once 请求记录随 `state.json` 持久化在 `requests` 字段中（每条含首次成功的 `version`、约束的旧 `root` 与归一化 `transfers`），重开目录仍能识别；没有该字段的旧状态文件按空集合兼容读取。记录不参与状态根，也不随快照保存或恢复——快照仍只含 `accounts`、`version`、`root`；既有写入口保留记录，`init` 清空记录并保留其重置语义。
+
+首次成功的结算回执随 `state.json` 原子持久化在 `receipts` 字段中（按请求标识保存，每条只含首次成功的 `version`、归一化 `transfers` 与提交时的预览 `proof`），与账户、版本、成功记录在同一次临时文件落盘加原子改名中完成，写入失败时回执与原状态文件一并保留不变；没有该字段的旧状态文件按空集合兼容读取。回执不参与状态根，也不随快照保存或恢复——快照内容不扩展；既有写入口与恢复快照保留回执，`init` 清空回执。只有带回执构建产生的首次成功才有回执：旧成功记录没有对应条目，查询返回 `null`，查询与重复提交都不补写。
 
 - `snapshot <label>` 成功输出版本号（快照前版本）；`restore <label>` 成功输出新版本号；`snapshots` 以稳定键顺序输出快照映射的 JSON。
 - 未 init 以 1 退出；label 非法、重复创建、未知恢复与损坏快照以 2 退出；合法命令以 0 退出。`verify*` 仍只凭证明验证，不读取状态目录或快照。
